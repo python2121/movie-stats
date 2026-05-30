@@ -10,5 +10,17 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+
+        Window(CleanupCategory.images.title, id: CleanupCategory.images.id) {
+            FileCleanupView(category: .images)
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
+
+        Window(CleanupCategory.text.title, id: CleanupCategory.text.id) {
+            FileCleanupView(category: .text)
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 }

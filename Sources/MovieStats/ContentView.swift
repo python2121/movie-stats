@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -117,20 +118,21 @@ struct ContentView: View {
 
             Spacer()
 
-            // Placeholder buttons for future features.
             Button {
-                // TODO: future feature
+                openWindow(id: CleanupCategory.images.id)
             } label: {
-                Label("Placeholder", systemImage: "wand.and.stars")
+                Label("Scan Images", systemImage: "photo.on.rectangle")
             }
-            .disabled(true)
+            .disabled(!model.hasDirectory)
+            .help("Scan this directory for images")
 
             Button {
-                // TODO: future feature
+                openWindow(id: CleanupCategory.text.id)
             } label: {
-                Label("Placeholder", systemImage: "slider.horizontal.3")
+                Label("Scan Text Files", systemImage: "doc.text")
             }
-            .disabled(true)
+            .disabled(!model.hasDirectory)
+            .help("Scan this directory for .txt and .nfo files")
         }
     }
 
