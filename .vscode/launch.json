@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:movie-stats}",
+            "name": "Debug MovieStats",
+            "target": "MovieStats",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MovieStats"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:movie-stats}",
+            "name": "Release MovieStats",
+            "target": "MovieStats",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MovieStats"
+        }
+    ]
+}
