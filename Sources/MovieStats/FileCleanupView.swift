@@ -8,7 +8,6 @@ struct FileCleanupView: View {
     let category: CleanupCategory
 
     @Environment(AppModel.self) private var app
-    @Environment(\.dismiss) private var dismiss
 
     @State private var model: FileCleanupModel
     @State private var confirmingDelete = false
@@ -121,7 +120,10 @@ struct FileCleanupView: View {
 
             Spacer()
 
-            Button("Dismiss") { dismiss() }
+            Button(model.allSelected ? "Deselect All" : "Select All") {
+                model.toggleSelectAll()
+            }
+            .disabled(model.files.isEmpty || model.isDeleting)
 
             Button("Clean \(category.title)") { confirmingDelete = true }
                 .keyboardShortcut(.defaultAction)

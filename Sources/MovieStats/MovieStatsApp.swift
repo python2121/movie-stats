@@ -22,5 +22,11 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+
+        Window("Multiple Videos per Folder", id: "duplicates") {
+            DuplicatesView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 }

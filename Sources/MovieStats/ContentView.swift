@@ -133,6 +133,14 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Scan this directory for .txt and .nfo files")
+
+            Button {
+                openWindow(id: "duplicates")
+            } label: {
+                Label("Find Duplicates", systemImage: "rectangle.stack.badge.play")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Find folders containing more than one video file")
         }
     }
 

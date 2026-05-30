@@ -22,6 +22,21 @@ final class FileCleanupModel {
 
     var hasSelection: Bool { !selection.isEmpty }
 
+    /// True when every listed file is checked (and there is at least one).
+    var allSelected: Bool {
+        !files.isEmpty && selection.count == files.count
+    }
+
+    /// Checks every listed file if not all are selected, otherwise clears the
+    /// selection. Backs the Select All / Deselect All button.
+    func toggleSelectAll() {
+        if allSelected {
+            selection.removeAll()
+        } else {
+            selection = Set(files.map(\.path))
+        }
+    }
+
     init(category: CleanupCategory) {
         self.category = category
     }
