@@ -8,6 +8,7 @@ struct FileCleanupView: View {
     let category: CleanupCategory
 
     @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
 
     @State private var model: FileCleanupModel
     @State private var confirmingDelete = false
@@ -26,6 +27,7 @@ struct FileCleanupView: View {
             footer
         }
         .frame(minWidth: 560, minHeight: 420)
+        .onExitCommand { dismiss() }
         .task { await model.scan(directory: app.directoryPath) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) \(category.noun)\(model.selection.count == 1 ? "" : "s")?",

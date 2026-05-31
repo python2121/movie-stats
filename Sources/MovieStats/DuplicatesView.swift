@@ -6,6 +6,7 @@ import SwiftUI
 /// permanently deleted.
 struct DuplicatesView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
 
     @State private var model = DuplicatesModel()
     @State private var confirmingDelete = false
@@ -19,6 +20,7 @@ struct DuplicatesView: View {
             footer
         }
         .frame(minWidth: 600, minHeight: 460)
+        .onExitCommand { dismiss() }
         .task { await model.scan(directory: app.directoryPath) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) file\(model.selection.count == 1 ? "" : "s")?",
