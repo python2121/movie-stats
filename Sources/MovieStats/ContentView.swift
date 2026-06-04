@@ -118,7 +118,7 @@ struct ContentView: View {
                                     .frame(minWidth: 28, alignment: .trailing)
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 6) {
-                                        Text(entry.movie.filename)
+                                        Text(entry.movie.displayTitle)
                                             .lineLimit(1)
                                             .truncationMode(.middle)
                                         chips(for: entry.movie)
@@ -263,7 +263,10 @@ struct ContentView: View {
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ranked }
         let needle = trimmed.lowercased()
-        return ranked.filter { $0.movie.filename.lowercased().contains(needle) }
+        return ranked.filter {
+            $0.movie.displayTitle.lowercased().contains(needle)
+                || $0.movie.filename.lowercased().contains(needle)
+        }
     }
 
     @ToolbarContentBuilder
@@ -358,9 +361,15 @@ private struct MovieDetailSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(movie.filename)
+                Text(movie.displayTitle)
                     .font(.title3.bold())
                     .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Text(movie.filename)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                 Text(movie.path)

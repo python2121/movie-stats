@@ -16,6 +16,21 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// When this file was last seen by a scan.
     var dateScanned: Date
 
+    /// Title extracted from the filename by `TitleParser` (e.g. "The Matrix").
+    /// Empty only for very old DB rows that haven't been touched since the
+    /// title column was added — UI falls back to `filename` in that case.
+    var parsedTitle: String = ""
+    /// Release year if `TitleParser` found one in the filename.
+    var parsedYear: Int?
+
+    /// `"Title (Year)"` when both are available; otherwise just the title.
+    /// Falls back to the filename if parsing produced nothing.
+    var displayTitle: String {
+        if parsedTitle.isEmpty { return filename }
+        if let year = parsedYear { return "\(parsedTitle) (\(year))" }
+        return parsedTitle
+    }
+
     // MARK: - Probed metadata (nil/0/false/[] until ffprobe runs)
 
     var width: Int?

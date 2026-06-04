@@ -4,16 +4,17 @@ import Foundation
 /// returns text out.
 ///
 /// Columns:
-///   - **Name** — the file name
+///   - **Title** — parsed movie title (e.g. "The Matrix (1999)"). Falls back to
+///     the filename if parsing produced nothing.
 ///   - **Content Type** — pipe-separated list of the classification plus any
 ///     HDR/Dolby Vision flags (e.g. `1080p Blu-ray Remux | HDR10 | Dolby Vision`)
 ///   - **Size** — human-readable file size
 enum CSVExporter {
     static func libraryCSV(movies: [MovieFile]) -> String {
-        var lines: [String] = ["Name,Content Type,Size"]
+        var lines: [String] = ["Title,Content Type,Size"]
 
         let sorted = movies.sorted {
-            $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
+            $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
         }
 
         for movie in sorted {
@@ -32,7 +33,7 @@ enum CSVExporter {
             let size = ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file)
 
             lines.append([
-                escape(movie.filename),
+                escape(movie.displayTitle),
                 escape(typeList),
                 escape(size),
             ].joined(separator: ","))

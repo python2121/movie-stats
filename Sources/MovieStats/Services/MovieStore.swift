@@ -65,7 +65,11 @@ final class MovieStore {
             sqlite3_finalize(stmt)
         }
 
+        let needsTitleBackfill = !present.contains("parsed_title")
+
         let columns: [(name: String, ddl: String)] = [
+            ("parsed_title", "TEXT"),
+            ("parsed_year", "INTEGER"),
             ("width", "INTEGER"),
             ("height", "INTEGER"),
             ("duration", "REAL"),
@@ -91,6 +95,60 @@ final class MovieStore {
             try exec("ALTER TABLE movies ADD COLUMN \(col.name) \(col.ddl);")
         }
         try exec("CREATE INDEX IF NOT EXISTS idx_movies_type ON movies(movie_type);")
+
+        if needsTitleBackfill {
+            try backfillParsedTitles()
+        }
+    }
+
+    /// Populates `parsed_title` / `parsed_year` for every row that doesn't
+    /// have them yet. Runs once, right after the columns are first added so
+    /// existing libraries don't need a manual rescan to get titles.
+    private func backfillParsedTitles() throws {
+        let selectSQL = "SELECT path, filename FROM movies WHERE parsed_title IS NULL OR parsed_title = '';"
+        var selectStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, selectSQL, -1, &selectStmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+
+        var pending: [(path: String, filename: String)] = []
+        while sqlite3_step(selectStmt) == SQLITE_ROW {
+            let path = String(cString: sqlite3_column_text(selectStmt, 0))
+            let filename = String(cString: sqlite3_column_text(selectStmt, 1))
+            pending.append((path, filename))
+        }
+        sqlite3_finalize(selectStmt)
+
+        guard !pending.isEmpty else { return }
+
+        try exec("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let updateSQL = "UPDATE movies SET parsed_title = ?, parsed_year = ? WHERE path = ?;"
+            var updateStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nil) == SQLITE_OK else {
+                throw MovieStoreError.prepare(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(updateStmt) }
+
+            for row in pending {
+                let parsed = TitleParser.parse(filename: row.filename)
+                sqlite3_bind_text(updateStmt, 1, parsed.title, -1, SQLITE_TRANSIENT)
+                if let year = parsed.year {
+                    sqlite3_bind_int64(updateStmt, 2, Int64(year))
+                } else {
+                    sqlite3_bind_null(updateStmt, 2)
+                }
+                sqlite3_bind_text(updateStmt, 3, row.path, -1, SQLITE_TRANSIENT)
+                guard sqlite3_step(updateStmt) == SQLITE_DONE else {
+                    throw MovieStoreError.exec(lastErrorMessage())
+                }
+                sqlite3_reset(updateStmt)
+            }
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
     }
 
     /// Reconciles the table with the latest filesystem scan, all in one
@@ -103,12 +161,14 @@ final class MovieStore {
             let now = Date().timeIntervalSince1970
 
             let upsertSQL = """
-                INSERT INTO movies (path, filename, size, date_scanned)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO movies (path, filename, size, date_scanned, parsed_title, parsed_year)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     filename = excluded.filename,
                     size = excluded.size,
-                    date_scanned = excluded.date_scanned;
+                    date_scanned = excluded.date_scanned,
+                    parsed_title = excluded.parsed_title,
+                    parsed_year = excluded.parsed_year;
                 """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, upsertSQL, -1, &stmt, nil) == SQLITE_OK else {
@@ -117,10 +177,17 @@ final class MovieStore {
             defer { sqlite3_finalize(stmt) }
 
             for file in files {
+                let parsed = TitleParser.parse(filename: file.filename)
                 sqlite3_bind_text(stmt, 1, file.path, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 2, file.filename, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_int64(stmt, 3, file.size)
                 sqlite3_bind_double(stmt, 4, now)
+                sqlite3_bind_text(stmt, 5, parsed.title, -1, SQLITE_TRANSIENT)
+                if let year = parsed.year {
+                    sqlite3_bind_int64(stmt, 6, Int64(year))
+                } else {
+                    sqlite3_bind_null(stmt, 6)
+                }
                 guard sqlite3_step(stmt) == SQLITE_DONE else {
                     throw MovieStoreError.exec(lastErrorMessage())
                 }
@@ -155,7 +222,8 @@ final class MovieStore {
                    video_tracks, audio_tracks, subtitle_tracks,
                    audio_codecs, audio_channels, audio_languages,
                    subtitle_codecs, subtitle_languages,
-                   movie_type, probed_at
+                   movie_type, probed_at,
+                   parsed_title, parsed_year
             FROM movies
             ORDER BY filename COLLATE NOCASE;
             """
@@ -279,6 +347,8 @@ final class MovieStore {
         movie.subtitleLanguages = splitCSV(readNullableText(stmt, 21))
         movie.movieType = readNullableText(stmt, 22)
         movie.probedAt = readNullableDouble(stmt, 23).map { Date(timeIntervalSince1970: $0) }
+        movie.parsedTitle = readNullableText(stmt, 24) ?? ""
+        movie.parsedYear = readNullableInt(stmt, 25)
         return movie
     }
 
