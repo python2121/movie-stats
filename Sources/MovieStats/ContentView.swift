@@ -393,21 +393,74 @@ private struct MovieDetailSheet: View {
         return String(format: "%.1f Mbps", mbps)
     }
 
+    /// Up to this many tracks, list each one individually with its codec; past
+    /// it, fall back to a grouped-by-language count so long subtitle lists stay
+    /// readable.
+    private static let detailedListThreshold = 5
+
     private var audioTracksDetail: String {
-        guard !movie.audioCodecs.isEmpty else { return "\(movie.audioTracks)" }
-        let entries = movie.audioCodecs.enumerated().map { idx, codec in
-            let channels = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
-            let channelLabel = Self.channelLabel(channels)
-            let codecLabel = codec.isEmpty ? "?" : codec.uppercased()
-            return channelLabel.isEmpty ? codecLabel : "\(codecLabel) \(channelLabel)"
+        guard movie.audioTracks > 0 else { return "0" }
+        if movie.audioCodecs.isEmpty { return "\(movie.audioTracks)" }
+
+        if movie.audioCodecs.count <= Self.detailedListThreshold {
+            let parts = movie.audioCodecs.enumerated().map { idx, codec in
+                let lang = Self.localizedLanguage(at: idx, in: movie.audioLanguages)
+                let codecLabel = codec.isEmpty ? "?" : codec.uppercased()
+                let channels = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
+                let channelLabel = Self.channelLabel(channels)
+                return [lang, codecLabel, channelLabel]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+            }
+            return "\(movie.audioTracks) — \(parts.joined(separator: ", "))"
         }
-        return "\(movie.audioTracks) — \(entries.joined(separator: ", "))"
+        return "\(movie.audioTracks) — \(Self.groupedByLanguage(movie.audioLanguages, totalTracks: movie.audioCodecs.count))"
     }
 
     private var subtitleTracksDetail: String {
-        let nonEmpty = movie.subtitleCodecs.filter { !$0.isEmpty }
-        guard !nonEmpty.isEmpty else { return "\(movie.subtitleTracks)" }
-        return "\(movie.subtitleTracks) — \(nonEmpty.joined(separator: ", "))"
+        guard movie.subtitleTracks > 0 else { return "0" }
+        if movie.subtitleCodecs.isEmpty { return "\(movie.subtitleTracks)" }
+
+        if movie.subtitleCodecs.count <= Self.detailedListThreshold {
+            let parts = movie.subtitleCodecs.enumerated().map { idx, codec in
+                let lang = Self.localizedLanguage(at: idx, in: movie.subtitleLanguages)
+                let codecLabel = codec.isEmpty ? "?" : codec
+                return lang.isEmpty ? codecLabel : "\(lang) (\(codecLabel))"
+            }
+            return "\(movie.subtitleTracks) — \(parts.joined(separator: ", "))"
+        }
+        return "\(movie.subtitleTracks) — \(Self.groupedByLanguage(movie.subtitleLanguages, totalTracks: movie.subtitleCodecs.count))"
+    }
+
+    /// Groups raw ISO 639 codes into "English ×40, French ×12, Unknown ×3"
+    /// summary text, ordered by descending count. `totalTracks` is the number
+    /// of stream entries — when `languages` is shorter (legacy DB rows), the
+    /// remainder is counted as Unknown.
+    private static func groupedByLanguage(_ languages: [String], totalTracks: Int) -> String {
+        var counts: [String: Int] = [:]
+        for i in 0..<totalTracks {
+            let code = i < languages.count ? languages[i] : "und"
+            let name = localizedLanguage(code: code)
+            counts[name, default: 0] += 1
+        }
+        return counts
+            .sorted { ($0.value, $0.key) > ($1.value, $1.key) }
+            .map { "\($0.key) ×\($0.value)" }
+            .joined(separator: ", ")
+    }
+
+    private static func localizedLanguage(at index: Int, in languages: [String]) -> String {
+        let code = index < languages.count ? languages[index] : "und"
+        return localizedLanguage(code: code)
+    }
+
+    private static func localizedLanguage(code: String) -> String {
+        let normalized = code.lowercased()
+        guard !normalized.isEmpty, normalized != "und" else { return "Unknown" }
+        if let name = Locale(identifier: "en_US").localizedString(forLanguageCode: normalized) {
+            return name.capitalized
+        }
+        return normalized.uppercased()
     }
 
     private static func channelLabel(_ count: Int) -> String {

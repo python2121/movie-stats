@@ -81,7 +81,9 @@ final class MovieStore {
             ("subtitle_tracks", "INTEGER"),
             ("audio_codecs", "TEXT"),
             ("audio_channels", "TEXT"),
+            ("audio_languages", "TEXT"),
             ("subtitle_codecs", "TEXT"),
+            ("subtitle_languages", "TEXT"),
             ("movie_type", "TEXT"),
             ("probed_at", "REAL"),
         ]
@@ -151,7 +153,8 @@ final class MovieStore {
                    video_codec, container, pix_fmt,
                    is_10bit, hdr_format, has_dolby_vision,
                    video_tracks, audio_tracks, subtitle_tracks,
-                   audio_codecs, audio_channels, subtitle_codecs,
+                   audio_codecs, audio_channels, audio_languages,
+                   subtitle_codecs, subtitle_languages,
                    movie_type, probed_at
             FROM movies
             ORDER BY filename COLLATE NOCASE;
@@ -198,7 +201,8 @@ final class MovieStore {
                 video_codec = ?, container = ?, pix_fmt = ?,
                 is_10bit = ?, hdr_format = ?, has_dolby_vision = ?,
                 video_tracks = ?, audio_tracks = ?, subtitle_tracks = ?,
-                audio_codecs = ?, audio_channels = ?, subtitle_codecs = ?,
+                audio_codecs = ?, audio_channels = ?, audio_languages = ?,
+                subtitle_codecs = ?, subtitle_languages = ?,
                 movie_type = ?, probed_at = ?
             WHERE path = ?;
             """
@@ -223,10 +227,12 @@ final class MovieStore {
         sqlite3_bind_int(stmt, 13, Int32(info.subtitleTracks))
         bindNullableText(stmt, 14, info.audioCodecs.joined(separator: ","))
         bindNullableText(stmt, 15, info.audioChannels.map(String.init).joined(separator: ","))
-        bindNullableText(stmt, 16, info.subtitleCodecs.joined(separator: ","))
-        bindNullableText(stmt, 17, movieType)
-        sqlite3_bind_double(stmt, 18, Date().timeIntervalSince1970)
-        sqlite3_bind_text(stmt, 19, path, -1, SQLITE_TRANSIENT)
+        bindNullableText(stmt, 16, info.audioLanguages.joined(separator: ","))
+        bindNullableText(stmt, 17, info.subtitleCodecs.joined(separator: ","))
+        bindNullableText(stmt, 18, info.subtitleLanguages.joined(separator: ","))
+        bindNullableText(stmt, 19, movieType)
+        sqlite3_bind_double(stmt, 20, Date().timeIntervalSince1970)
+        sqlite3_bind_text(stmt, 21, path, -1, SQLITE_TRANSIENT)
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw MovieStoreError.exec(lastErrorMessage())
@@ -268,9 +274,11 @@ final class MovieStore {
         movie.subtitleTracks = Int(sqlite3_column_int(stmt, 16))
         movie.audioCodecs = splitCSV(readNullableText(stmt, 17))
         movie.audioChannels = splitCSV(readNullableText(stmt, 18)).compactMap(Int.init)
-        movie.subtitleCodecs = splitCSV(readNullableText(stmt, 19))
-        movie.movieType = readNullableText(stmt, 20)
-        movie.probedAt = readNullableDouble(stmt, 21).map { Date(timeIntervalSince1970: $0) }
+        movie.audioLanguages = splitCSV(readNullableText(stmt, 19))
+        movie.subtitleCodecs = splitCSV(readNullableText(stmt, 20))
+        movie.subtitleLanguages = splitCSV(readNullableText(stmt, 21))
+        movie.movieType = readNullableText(stmt, 22)
+        movie.probedAt = readNullableDouble(stmt, 23).map { Date(timeIntervalSince1970: $0) }
         return movie
     }
 

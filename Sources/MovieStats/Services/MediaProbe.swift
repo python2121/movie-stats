@@ -23,7 +23,12 @@ struct MediaInfo: Sendable {
     var audioCodecs: [String]
     /// Per-track audio channel counts, matched to `audioCodecs` by index.
     var audioChannels: [Int]
+    /// Per-track audio language codes (ISO 639), matched to `audioCodecs` by
+    /// index. `"und"` when ffprobe couldn't determine one.
+    var audioLanguages: [String]
     var subtitleCodecs: [String]
+    /// Per-track subtitle language codes, matched to `subtitleCodecs` by index.
+    var subtitleLanguages: [String]
 }
 
 /// Spawns `ffprobe` and parses its JSON output into a `MediaInfo`. The binary
@@ -138,7 +143,9 @@ enum MediaProbe {
             subtitleTracks: subtitleStreams.count,
             audioCodecs: audioStreams.map { $0.codecName ?? "" },
             audioChannels: audioStreams.map { $0.channels ?? 0 },
-            subtitleCodecs: subtitleStreams.map { $0.codecName ?? "" }
+            audioLanguages: audioStreams.map { $0.tags?.language ?? "und" },
+            subtitleCodecs: subtitleStreams.map { $0.codecName ?? "" },
+            subtitleLanguages: subtitleStreams.map { $0.tags?.language ?? "und" }
         )
     }
 
@@ -158,6 +165,7 @@ enum MediaProbe {
         let colorTransfer: String?
         let channels: Int?
         let sideDataList: [SideData]?
+        let tags: Tags?
 
         enum CodingKeys: String, CodingKey {
             case codecType = "codec_type"
@@ -168,7 +176,12 @@ enum MediaProbe {
             case colorTransfer = "color_transfer"
             case channels
             case sideDataList = "side_data_list"
+            case tags
         }
+    }
+
+    private struct Tags: Decodable {
+        let language: String?
     }
 
     private struct SideData: Decodable {

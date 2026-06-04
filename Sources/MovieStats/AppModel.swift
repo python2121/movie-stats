@@ -211,7 +211,9 @@ final class AppModel {
             m.subtitleTracks = info.subtitleTracks
             m.audioCodecs = info.audioCodecs
             m.audioChannels = info.audioChannels
+            m.audioLanguages = info.audioLanguages
             m.subtitleCodecs = info.subtitleCodecs
+            m.subtitleLanguages = info.subtitleLanguages
             m.movieType = movieType
             m.probedAt = Date()
             movies[idx] = m

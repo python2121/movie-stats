@@ -33,10 +33,13 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     var videoTracks: Int = 0
     var audioTracks: Int = 0
     var subtitleTracks: Int = 0
-    /// Comma-friendly arrays — persisted in SQLite as joined strings.
+    /// Comma-friendly arrays — persisted in SQLite as joined strings. The
+    /// `*Languages` arrays parallel `*Codecs` by index.
     var audioCodecs: [String] = []
     var audioChannels: [Int] = []
+    var audioLanguages: [String] = []
     var subtitleCodecs: [String] = []
+    var subtitleLanguages: [String] = []
     /// `MovieType.rawValue` — the derived library category. Nil while the row
     /// hasn't been probed yet.
     var movieType: String?
