@@ -768,16 +768,18 @@ private struct CategoryPieCard: View {
                                     .frame(width: 8, height: 8)
                                 Text(slice.type)
                                     .font(.caption)
-                                    .foregroundStyle(.primary)
+                                    .foregroundColor(Color.primary)
                                     .lineLimit(1)
                                 Spacer(minLength: 6)
                                 Text(formattedValue(slice))
                                     .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                    .foregroundColor(Color.secondary)
                             }
                         }
                     }
                     .frame(width: 180)
+                    .tint(Color.primary)
+                    .foregroundColor(Color.primary)
                 }
             }
         }
