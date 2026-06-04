@@ -10,6 +10,14 @@ struct ContentView: View {
     @State private var searchExpanded = false
     @FocusState private var searchFocused: Bool
     @State private var selectedMovie: MovieFile?
+    @State private var sortMode: SortMode = .sizeDescending
+    @State private var selectedTypes: Set<String> = []  // empty = all
+
+    enum SortMode: String, CaseIterable, Identifiable {
+        case sizeDescending = "Largest First"
+        case titleAscending = "Title A→Z"
+        var id: String { rawValue }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -94,10 +102,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                 Spacer()
             } else {
-                HStack {
+                HStack(spacing: 10) {
                     Text("Library Details")
                         .font(.headline)
                     Spacer()
+                    sortMenu
+                    typeFilterMenu
                     searchControl
                 }
 
@@ -182,7 +192,8 @@ struct ContentView: View {
             .frame(width: 240)
             .onAppear { searchFocused = true }
             .onChange(of: searchFocused) { _, focused in
-                if !focused && searchText.isEmpty {
+                if !focused {
+                    searchText = ""
                     searchExpanded = false
                 }
             }
@@ -256,17 +267,100 @@ struct ContentView: View {
         }
     }
 
-    /// Movies matching the current search text, paired with their rank in the
-    /// full size-sorted list (so a filtered movie still shows its true rank).
+    /// The list shown in the main library view: applies the current sort
+    /// order, type filter, and search text. The row number is the position in
+    /// the currently displayed list (1, 2, 3 …), not an absolute library rank.
     private var filteredMovies: [(rank: Int, movie: MovieFile)] {
-        let ranked = model.moviesBySize.enumerated().map { (rank: $0.offset + 1, movie: $0.element) }
-        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return ranked }
-        let needle = trimmed.lowercased()
-        return ranked.filter {
-            $0.movie.displayTitle.lowercased().contains(needle)
-                || $0.movie.filename.lowercased().contains(needle)
+        let sorted: [MovieFile]
+        switch sortMode {
+        case .sizeDescending:
+            sorted = model.moviesBySize
+        case .titleAscending:
+            sorted = model.movies.sorted {
+                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
+            }
         }
+
+        let typeFiltered: [MovieFile]
+        if selectedTypes.isEmpty {
+            typeFiltered = sorted
+        } else {
+            typeFiltered = sorted.filter { movie in
+                selectedTypes.contains(movie.movieType ?? "Unprobed")
+            }
+        }
+
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let final: [MovieFile]
+        if trimmed.isEmpty {
+            final = typeFiltered
+        } else {
+            let needle = trimmed.lowercased()
+            final = typeFiltered.filter {
+                $0.displayTitle.lowercased().contains(needle)
+                    || $0.filename.lowercased().contains(needle)
+            }
+        }
+
+        return final.enumerated().map { (rank: $0.offset + 1, movie: $0.element) }
+    }
+
+    /// Sort order selector — small dropdown showing the current choice.
+    private var sortMenu: some View {
+        Menu {
+            ForEach(SortMode.allCases) { mode in
+                Button {
+                    sortMode = mode
+                } label: {
+                    if mode == sortMode {
+                        Label(mode.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(mode.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Label("Sort: \(sortMode.rawValue)", systemImage: "arrow.up.arrow.down")
+                .font(.callout)
+                .labelStyle(.titleAndIcon)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    /// Multi-select content-type filter. Empty selection = "All Types".
+    private var typeFilterMenu: some View {
+        Menu {
+            Button("All Types") { selectedTypes.removeAll() }
+            Divider()
+            ForEach(MovieType.allCases, id: \.rawValue) { type in
+                typeToggle(type.rawValue)
+            }
+            typeToggle("Unprobed")
+        } label: {
+            Label(typeFilterLabel, systemImage: "line.3.horizontal.decrease.circle")
+                .font(.callout)
+                .labelStyle(.titleAndIcon)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private func typeToggle(_ name: String) -> some View {
+        Toggle(name, isOn: Binding(
+            get: { selectedTypes.contains(name) },
+            set: { on in
+                if on { selectedTypes.insert(name) }
+                else { selectedTypes.remove(name) }
+            }
+        ))
+    }
+
+    private var typeFilterLabel: String {
+        if selectedTypes.isEmpty { return "All Types" }
+        if selectedTypes.count == 1 { return selectedTypes.first ?? "1 Type" }
+        return "\(selectedTypes.count) Types"
     }
 
     @ToolbarContentBuilder
