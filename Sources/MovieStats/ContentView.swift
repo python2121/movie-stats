@@ -141,6 +141,14 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Find folders containing more than one video file")
+
+            Button {
+                openWindow(id: "empty-folders")
+            } label: {
+                Label("Find Empty Folders", systemImage: "folder.badge.minus")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Find folders that contain no files")
         }
     }
 

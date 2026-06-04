@@ -28,5 +28,11 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+
+        Window("Empty Folders", id: "empty-folders") {
+            EmptyFoldersView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 }

@@ -127,7 +127,7 @@ struct FileCleanupView: View {
             }
             .disabled(model.files.isEmpty || model.isDeleting)
 
-            Button("Clean \(category.title)") { confirmingDelete = true }
+            Button("Delete Selected") { confirmingDelete = true }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!model.hasSelection || model.isDeleting)
         }
