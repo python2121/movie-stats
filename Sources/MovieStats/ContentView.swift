@@ -5,6 +5,8 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
 
+    @State private var searchText = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             header
@@ -55,7 +57,8 @@ struct ContentView: View {
         }
     }
 
-    /// Ranked list of every movie, largest first, with its size.
+    /// Ranked list of every movie, largest first, with its size. The original
+    /// size rank is preserved when the search filter narrows the list.
     private var movieList: some View {
         VStack(alignment: .leading, spacing: 8) {
             if model.movies.isEmpty {
@@ -65,37 +68,63 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                 Spacer()
             } else {
-                Text("Movies by size")
-                    .font(.headline)
-                List {
-                    ForEach(Array(model.moviesBySize.enumerated()), id: \.element.id) { index, movie in
-                        HStack(spacing: 12) {
-                            Text("\(index + 1)")
-                                .font(.callout.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .frame(minWidth: 28, alignment: .trailing)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(movie.filename)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Text(movie.path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer()
-                            Text(byteString(movie.size))
-                                .font(.callout.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                        .help(movie.path)
-                    }
+                HStack {
+                    Text("Movies by size")
+                        .font(.headline)
+                    Spacer()
+                    TextField("Filter…", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 220)
                 }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
+
+                let matches = filteredMovies
+                if matches.isEmpty {
+                    Spacer()
+                    Text("No matches for \"\(searchText)\".")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    Spacer()
+                } else {
+                    List {
+                        ForEach(matches, id: \.movie.id) { entry in
+                            HStack(spacing: 12) {
+                                Text("\(entry.rank)")
+                                    .font(.callout.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: 28, alignment: .trailing)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.movie.filename)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Text(entry.movie.path)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                Text(byteString(entry.movie.size))
+                                    .font(.callout.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .help(entry.movie.path)
+                        }
+                    }
+                    .listStyle(.inset(alternatesRowBackgrounds: true))
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    /// Movies matching the current search text, paired with their rank in the
+    /// full size-sorted list (so a filtered movie still shows its true rank).
+    private var filteredMovies: [(rank: Int, movie: MovieFile)] {
+        let ranked = model.moviesBySize.enumerated().map { (rank: $0.offset + 1, movie: $0.element) }
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ranked }
+        let needle = trimmed.lowercased()
+        return ranked.filter { $0.movie.filename.lowercased().contains(needle) }
     }
 
     @ToolbarContentBuilder
