@@ -54,6 +54,21 @@ struct ContentView: View {
                 Text("Open a directory to begin scanning for movies.")
                     .foregroundStyle(.secondary)
             }
+            if model.isProbing {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading metadata… \(model.probedCount)/\(model.probeTotal)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if !model.ffprobeAvailable {
+                Label(
+                    "ffprobe not found — install ffmpeg via Homebrew to detect movie types.",
+                    systemImage: "info.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -93,9 +108,12 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                     .frame(minWidth: 28, alignment: .trailing)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.movie.filename)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                                    HStack(spacing: 6) {
+                                        Text(entry.movie.filename)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        chips(for: entry.movie)
+                                    }
                                     Text(entry.movie.path)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -115,6 +133,23 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    /// Type/HDR/DV/10-bit pills shown next to a movie's filename.
+    @ViewBuilder
+    private func chips(for movie: MovieFile) -> some View {
+        if let type = movie.movieType, type != MovieType.unknown.rawValue {
+            Chip(text: type, color: .blue)
+        }
+        if movie.hasDolbyVision {
+            Chip(text: "DV", color: .purple)
+        }
+        if let hdr = movie.hdrFormat {
+            Chip(text: hdr, color: .orange)
+        }
+        if movie.is10Bit {
+            Chip(text: "10-bit", color: .teal)
+        }
     }
 
     /// Movies matching the current search text, paired with their rank in the
@@ -144,6 +179,14 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory || model.isScanning)
             .help("Rescan the current directory")
+
+            Button {
+                Task { await model.reprobeAll() }
+            } label: {
+                Label("Reprobe", systemImage: "waveform.badge.magnifyingglass")
+            }
+            .disabled(!model.hasDirectory || model.isScanning || model.isProbing)
+            .help("Re-read codec/resolution/HDR for every movie")
 
             Spacer()
 
@@ -198,6 +241,23 @@ struct ContentView: View {
 
     private func byteString(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+/// A small capsule tag rendered next to a movie's filename to surface a
+/// classification or flag (type, HDR, DV, 10-bit).
+private struct Chip: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
+            .fixedSize()
     }
 }
 

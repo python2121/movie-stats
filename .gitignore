@@ -4,3 +4,4 @@
 *.xcodeproj
 /*.app
 .swiftpm/
+/Resources/ffprobe

@@ -33,6 +33,14 @@ else
   echo "WARNING: Resources/AppIcon.icns not found — run ./make-icon.sh" >&2
 fi
 
+# Bundled ffprobe — used to read codec/resolution/HDR/track info per movie.
+if [[ ! -x Resources/ffprobe ]]; then
+  echo "==> fetching ffprobe (one-time)"
+  ./Tools/fetch-ffprobe.sh
+fi
+cp Resources/ffprobe "${APP_DIR}/Contents/Resources/ffprobe"
+chmod +x "${APP_DIR}/Contents/Resources/ffprobe"
+
 cat >"${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -63,7 +71,9 @@ cat >"${APP_DIR}/Contents/Info.plist" <<PLIST
 PLIST
 
 # Ad-hoc signature is enough for a personal, non-distributed app.
+# Sign the nested ffprobe first so the outer bundle's signature stays valid.
 echo "==> codesigning (ad-hoc)"
+codesign --force --sign - "${APP_DIR}/Contents/Resources/ffprobe"
 codesign --force --sign - --identifier "${BUNDLE_ID}" "${APP_DIR}"
 
 echo "==> done: $(pwd)/${APP_DIR}"
