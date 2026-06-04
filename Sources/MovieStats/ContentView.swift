@@ -1,4 +1,5 @@
 import AppKit
+import Charts
 import SwiftUI
 
 struct ContentView: View {
@@ -6,16 +7,27 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var searchText = ""
+    @State private var selectedMovie: MovieFile?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             header
 
-            HStack(spacing: 16) {
-                StatCard(title: "Movies", value: "\(model.movieCount)", systemImage: "film")
-                StatCard(title: "Larger than 20 GB", value: "\(model.largeMovieCount)", systemImage: "externaldrive.badge.exclamationmark")
-                StatCard(title: "Total Size", value: byteString(model.totalSize), systemImage: "internaldrive")
+            HStack(alignment: .top, spacing: 16) {
+                VStack(spacing: 8) {
+                    CompactStatCard(title: "Movies", value: "\(model.movieCount)", systemImage: "film")
+                    CompactStatCard(title: "Over 20 GB", value: "\(model.largeMovieCount)", systemImage: "externaldrive.badge.exclamationmark")
+                    CompactStatCard(title: "Total Size", value: byteString(model.totalSize), systemImage: "internaldrive")
+                }
+                .frame(width: 170)
+
+                CategoryPieCard(title: "By movie count", slices: countSlices)
+                    .frame(maxWidth: .infinity)
+
+                CategoryPieCard(title: "By total size", slices: sizeSlices)
+                    .frame(maxWidth: .infinity)
             }
+            .frame(height: 200)
 
             if let error = model.lastError {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -28,12 +40,15 @@ struct ContentView: View {
         .padding(28)
         .frame(minWidth: 600, minHeight: 380)
         .toolbar { toolbarContent }
-        .overlay {
-            if model.isScanning {
-                ProgressView("Scanning…")
-                    .padding(24)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            }
+        .sheet(isPresented: Binding(
+            get: { model.isScanning || model.isProbing },
+            set: { _ in }
+        )) {
+            ScanProgressSheet()
+                .environment(model)
+        }
+        .sheet(item: $selectedMovie) { movie in
+            MovieDetailSheet(movie: movie)
         }
     }
 
@@ -54,14 +69,7 @@ struct ContentView: View {
                 Text("Open a directory to begin scanning for movies.")
                     .foregroundStyle(.secondary)
             }
-            if model.isProbing {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Reading metadata… \(model.probedCount)/\(model.probeTotal)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else if !model.ffprobeAvailable {
+            if !model.ffprobeAvailable {
                 Label(
                     "ffprobe not found — install ffmpeg via Homebrew to detect movie types.",
                     systemImage: "info.circle"
@@ -126,6 +134,8 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .help(entry.movie.path)
+                            .contentShape(Rectangle())
+                            .onTapGesture { selectedMovie = entry.movie }
                         }
                     }
                     .listStyle(.inset(alternatesRowBackgrounds: true))
@@ -142,13 +152,53 @@ struct ContentView: View {
             Chip(text: type, color: .blue)
         }
         if movie.hasDolbyVision {
-            Chip(text: "DV", color: .purple)
+            Chip(text: "Dolby Vision", color: .purple)
         }
         if let hdr = movie.hdrFormat {
             Chip(text: hdr, color: .orange)
         }
         if movie.is10Bit {
             Chip(text: "10-bit", color: .teal)
+        }
+    }
+
+    // MARK: - Pie chart slices
+
+    private var countSlices: [CategorySlice] {
+        categorySlices(value: { _ in 1.0 })
+    }
+
+    private var sizeSlices: [CategorySlice] {
+        categorySlices(value: { Double($0.size) })
+    }
+
+    /// Groups `model.movies` by `movieType`, sums each group's contribution
+    /// via `value`, and returns slices in a stable category order. Skips empty
+    /// categories so the chart isn't cluttered.
+    private func categorySlices(value: (MovieFile) -> Double) -> [CategorySlice] {
+        let grouped = Dictionary(grouping: model.movies) { movie -> String in
+            movie.movieType ?? "Unprobed"
+        }
+        let ordered = MovieType.allCases.map(\.rawValue) + ["Unprobed"]
+        return ordered.compactMap { type in
+            guard let bucket = grouped[type], !bucket.isEmpty else { return nil }
+            let total = bucket.reduce(0.0) { $0 + value($1) }
+            guard total > 0 else { return nil }
+            return CategorySlice(type: type, value: total, color: Self.color(forCategory: type))
+        }
+    }
+
+    private static func color(forCategory type: String) -> Color {
+        switch type {
+        case MovieType.uhdRemux.rawValue:     return .orange
+        case MovieType.bluRayRemux.rawValue:  return .blue
+        case MovieType.uhdEncode.rawValue:    return .red
+        case MovieType.fullHDEncode.rawValue: return .teal
+        case MovieType.hdEncode.rawValue:     return .green
+        case MovieType.sd.rawValue:           return .brown
+        case MovieType.unknown.rawValue:      return .gray
+        case "Unprobed":                      return Color(white: 0.55)
+        default:                              return .secondary
         }
     }
 
@@ -244,6 +294,198 @@ struct ContentView: View {
     }
 }
 
+/// In-window detail popup. Shows every metadata field we've collected for the
+/// selected movie in an aligned two-column grid. Triggered by clicking a row
+/// in the main movie list.
+private struct MovieDetailSheet: View {
+    let movie: MovieFile
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(movie.filename)
+                    .font(.title3.bold())
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Text(movie.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            .padding(.bottom, 14)
+
+            Divider()
+
+            ScrollView {
+                Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    detailRow("Type", movie.movieType ?? "—")
+                    detailRow("Size", ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file))
+                    detailRow("Resolution", resolutionText)
+                    detailRow("Duration", durationText)
+                    detailRow("Bitrate", bitrateText)
+                    detailRow("Video Codec", (movie.videoCodec ?? "—").uppercased())
+                    detailRow("Container", movie.container ?? "—")
+                    detailRow("Pixel Format", movie.pixFmt ?? "—")
+                    detailRow("Bit Depth", movie.is10Bit ? "10-bit" : "8-bit")
+                    detailRow("HDR", movie.hdrFormat ?? "—")
+                    detailRow("Dolby Vision", movie.hasDolbyVision ? "Yes" : "No")
+                    detailRow("Video Tracks", String(movie.videoTracks))
+                    detailRow("Audio Tracks", audioTracksDetail)
+                    detailRow("Subtitle Tracks", subtitleTracksDetail)
+                    detailRow("Last Scanned", dateText(movie.dateScanned))
+                    detailRow("Last Probed", movie.probedAt.map(dateText) ?? "—")
+                }
+                .padding(.vertical, 14)
+            }
+            .frame(maxHeight: 380)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 12)
+        }
+        .padding(22)
+        .frame(width: 580)
+        .onExitCommand { dismiss() }
+    }
+
+    @ViewBuilder
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            Text(value)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - Field formatters
+
+    private var resolutionText: String {
+        guard let w = movie.width, let h = movie.height, w > 0, h > 0 else { return "—" }
+        return "\(w)×\(h)"
+    }
+
+    private var durationText: String {
+        guard let seconds = movie.durationSeconds, seconds > 0 else { return "—" }
+        let total = Int(seconds.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 { return "\(h)h \(m)m \(s)s" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
+
+    private var bitrateText: String {
+        guard let bitrate = movie.bitrate, bitrate > 0 else { return "—" }
+        let mbps = Double(bitrate) / 1_000_000
+        return String(format: "%.1f Mbps", mbps)
+    }
+
+    private var audioTracksDetail: String {
+        guard !movie.audioCodecs.isEmpty else { return "\(movie.audioTracks)" }
+        let entries = movie.audioCodecs.enumerated().map { idx, codec in
+            let channels = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
+            let channelLabel = Self.channelLabel(channels)
+            let codecLabel = codec.isEmpty ? "?" : codec.uppercased()
+            return channelLabel.isEmpty ? codecLabel : "\(codecLabel) \(channelLabel)"
+        }
+        return "\(movie.audioTracks) — \(entries.joined(separator: ", "))"
+    }
+
+    private var subtitleTracksDetail: String {
+        let nonEmpty = movie.subtitleCodecs.filter { !$0.isEmpty }
+        guard !nonEmpty.isEmpty else { return "\(movie.subtitleTracks)" }
+        return "\(movie.subtitleTracks) — \(nonEmpty.joined(separator: ", "))"
+    }
+
+    private static func channelLabel(_ count: Int) -> String {
+        switch count {
+        case 0: return ""
+        case 1: return "1.0"
+        case 2: return "2.0"
+        case 6: return "5.1"
+        case 7: return "6.1"
+        case 8: return "7.1"
+        default: return "\(count)ch"
+        }
+    }
+
+    private func dateText(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: date)
+    }
+}
+
+/// Modal progress sheet shown for the duration of a library scan + probe.
+/// Two phases: indeterminate during the directory walk, then a determinate
+/// progress bar with the file currently being probed.
+private struct ScanProgressSheet: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Scanning library")
+                .font(.headline)
+
+            if model.isScanning {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                Text("Scanning directory for movie files…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ProgressView(
+                    value: Double(model.probedCount),
+                    total: Double(max(model.probeTotal, 1))
+                )
+                .progressViewStyle(.linear)
+
+                HStack {
+                    Text("Reading metadata")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(model.probedCount) / \(model.probeTotal)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                if let path = model.currentProbePath {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(URL(fileURLWithPath: path).lastPathComponent)
+                            .font(.callout)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(path)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+        .interactiveDismissDisabled()
+    }
+}
+
 /// A small capsule tag rendered next to a movie's filename to surface a
 /// classification or flag (type, HDR, DV, 10-bit).
 private struct Chip: View {
@@ -261,22 +503,80 @@ private struct Chip: View {
     }
 }
 
-/// A simple stat tile for the main window.
-private struct StatCard: View {
+/// Compact stat tile used in the narrow left column. Icon + small caption +
+/// rounded value, in one horizontal row.
+private struct CompactStatCard: View {
     let title: String
     let value: String
     let systemImage: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: systemImage)
-                .font(.subheadline)
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(.title, design: .rounded).weight(.semibold))
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.system(.body, design: .rounded).weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            Spacer()
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// One wedge in a category pie chart.
+private struct CategorySlice: Identifiable {
+    let type: String
+    let value: Double
+    let color: Color
+    var id: String { type }
+}
+
+/// Donut chart tile showing how a metric splits across the library categories.
+private struct CategoryPieCard: View {
+    let title: String
+    let slices: [CategorySlice]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            if slices.isEmpty {
+                Spacer()
+                Text("No data yet")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Spacer()
+            } else {
+                Chart(slices) { slice in
+                    SectorMark(
+                        angle: .value("Share", slice.value),
+                        innerRadius: .ratio(0.55),
+                        angularInset: 1.5
+                    )
+                    .cornerRadius(2)
+                    .foregroundStyle(by: .value("Category", slice.type))
+                }
+                .chartForegroundStyleScale(
+                    domain: slices.map(\.type),
+                    range: slices.map(\.color)
+                )
+                .chartLegend(position: .trailing, alignment: .center, spacing: 6)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
     }
 }

@@ -24,6 +24,9 @@ final class AppModel {
     private(set) var isProbing = false
     private(set) var probedCount = 0
     private(set) var probeTotal = 0
+    /// Path of the most recently kicked-off probe — drives the live filename
+    /// shown in the scanning progress sheet.
+    private(set) var currentProbePath: String?
 
     /// True when an `ffprobe` binary is available (bundled or via Homebrew).
     /// Used to surface a hint banner if it isn't.
@@ -132,13 +135,15 @@ final class AppModel {
         }
         guard !pending.isEmpty else { return }
 
-        isProbing = true
         probedCount = 0
         probeTotal = pending.count
+        currentProbePath = pending.first?.path
+        isProbing = true
         defer {
             isProbing = false
             probedCount = 0
             probeTotal = 0
+            currentProbePath = nil
         }
 
         var nextIndex = 0
@@ -147,6 +152,7 @@ final class AppModel {
             while nextIndex < min(Self.probeConcurrency, pending.count) {
                 let item = pending[nextIndex]
                 nextIndex += 1
+                currentProbePath = item.path
                 group.addTask {
                     let info = await MediaProbe.probe(path: item.path)
                     return ProbeOutcome(path: item.path, size: item.size, info: info)
@@ -160,6 +166,7 @@ final class AppModel {
                 if nextIndex < pending.count {
                     let item = pending[nextIndex]
                     nextIndex += 1
+                    currentProbePath = item.path
                     group.addTask {
                         let info = await MediaProbe.probe(path: item.path)
                         return ProbeOutcome(path: item.path, size: item.size, info: info)
