@@ -7,6 +7,8 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var searchText = ""
+    @State private var searchExpanded = false
+    @FocusState private var searchFocused: Bool
     @State private var selectedMovie: MovieFile?
 
     var body: some View {
@@ -20,11 +22,12 @@ struct ContentView: View {
                     CompactStatCard(title: "Total Size", value: byteString(model.totalSize), systemImage: "internaldrive")
                 }
                 .frame(width: 170)
+                .frame(maxHeight: .infinity)
 
-                CategoryPieCard(title: "By movie count", slices: countSlices)
+                CategoryPieCard(title: "By movie count", slices: countSlices, valueKind: .count)
                     .frame(maxWidth: .infinity)
 
-                CategoryPieCard(title: "By total size", slices: sizeSlices)
+                CategoryPieCard(title: "By total size", slices: sizeSlices, valueKind: .bytes)
                     .frame(maxWidth: .infinity)
             }
             .frame(height: 200)
@@ -92,12 +95,10 @@ struct ContentView: View {
                 Spacer()
             } else {
                 HStack {
-                    Text("Movies by size")
+                    Text("Library Details")
                         .font(.headline)
                     Spacer()
-                    TextField("Filter…", text: $searchText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 220)
+                    searchControl
                 }
 
                 let matches = filteredMovies
@@ -143,6 +144,59 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    /// Expand-on-click filter control — collapses to a magnifying glass icon
+    /// when empty and unfocused, so it stops stealing focus when the user
+    /// clicks elsewhere.
+    @ViewBuilder
+    private var searchControl: some View {
+        if searchExpanded {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Filter…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                    .onSubmit { searchFocused = false }
+                    .onExitCommand {
+                        searchText = ""
+                        searchFocused = false
+                        searchExpanded = false
+                    }
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                        searchFocused = true
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear filter")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.quaternary.opacity(0.5), in: Capsule())
+            .frame(width: 240)
+            .onAppear { searchFocused = true }
+            .onChange(of: searchFocused) { _, focused in
+                if !focused && searchText.isEmpty {
+                    searchExpanded = false
+                }
+            }
+        } else {
+            Button {
+                searchExpanded = true
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .imageScale(.large)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Filter movies")
+        }
     }
 
     /// Type/HDR/DV/10-bit pills shown next to a movie's filename.
@@ -341,7 +395,7 @@ private struct MovieDetailSheet: View {
                 }
                 .padding(.vertical, 14)
             }
-            .frame(maxHeight: 380)
+            .frame(maxHeight: 500)
 
             Divider()
 
@@ -352,8 +406,8 @@ private struct MovieDetailSheet: View {
             }
             .padding(.top, 12)
         }
-        .padding(22)
-        .frame(width: 580)
+        .padding(28)
+        .frame(width: 760)
         .onExitCommand { dismiss() }
     }
 
@@ -581,6 +635,7 @@ private struct CompactStatCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
     }
 }
@@ -594,9 +649,16 @@ private struct CategorySlice: Identifiable {
 }
 
 /// Donut chart tile showing how a metric splits across the library categories.
+/// Mousing over a slice dims the others and shows the category, raw value, and
+/// percentage in the center of the donut.
 private struct CategoryPieCard: View {
+    enum ValueKind { case count, bytes }
+
     let title: String
     let slices: [CategorySlice]
+    let valueKind: ValueKind
+
+    @State private var hoveredSlice: CategorySlice?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -620,16 +682,92 @@ private struct CategoryPieCard: View {
                     )
                     .cornerRadius(2)
                     .foregroundStyle(by: .value("Category", slice.type))
+                    .opacity(hoveredSlice == nil || hoveredSlice?.id == slice.id ? 1.0 : 0.35)
                 }
                 .chartForegroundStyleScale(
                     domain: slices.map(\.type),
                     range: slices.map(\.color)
                 )
                 .chartLegend(position: .trailing, alignment: .center, spacing: 6)
+                .chartOverlay { _ in
+                    GeometryReader { geo in
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(Rectangle())
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case .active(let point):
+                                    hoveredSlice = sliceAt(point: point, in: geo.size)
+                                case .ended:
+                                    hoveredSlice = nil
+                                }
+                            }
+                    }
+                }
+                .overlay {
+                    if let slice = hoveredSlice {
+                        VStack(spacing: 1) {
+                            Text(slice.type)
+                                .font(.caption.weight(.semibold))
+                                .multilineTextAlignment(.center)
+                            Text(formattedValue(slice))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Text(formattedPercent(slice))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 6)
+                        .allowsHitTesting(false)
+                    }
+                }
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// Maps a hover position inside the chart's plot rectangle to a slice by
+    /// computing the angle from the center clockwise from 12 o'clock — the
+    /// same layout SwiftUI Charts uses for `SectorMark`.
+    private func sliceAt(point: CGPoint, in size: CGSize) -> CategorySlice? {
+        guard !slices.isEmpty else { return nil }
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let radius = sqrt(dx * dx + dy * dy)
+        let maxRadius = min(size.width, size.height) / 2 * 1.05
+        guard radius <= maxRadius else { return nil }
+
+        var angle = atan2(dx, -dy) * 180 / .pi
+        if angle < 0 { angle += 360 }
+
+        let total = slices.reduce(0.0) { $0 + $1.value }
+        guard total > 0 else { return nil }
+
+        var cumulative: Double = 0
+        for slice in slices {
+            let sweep = (slice.value / total) * 360
+            if angle <= cumulative + sweep { return slice }
+            cumulative += sweep
+        }
+        return slices.last
+    }
+
+    private func formattedValue(_ slice: CategorySlice) -> String {
+        switch valueKind {
+        case .count:
+            let n = Int(slice.value)
+            return "\(n) movie\(n == 1 ? "" : "s")"
+        case .bytes:
+            return ByteCountFormatter.string(fromByteCount: Int64(slice.value), countStyle: .file)
+        }
+    }
+
+    private func formattedPercent(_ slice: CategorySlice) -> String {
+        let total = slices.reduce(0.0) { $0 + $1.value }
+        guard total > 0 else { return "" }
+        return String(format: "%.1f%%", slice.value / total * 100)
     }
 }
