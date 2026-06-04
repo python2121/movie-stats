@@ -81,6 +81,13 @@ struct DuplicatesView: View {
                             Text("\(group.files.count) videos")
                                 .foregroundStyle(.secondary)
                             Spacer()
+                            Button(model.allButLargestSelected(in: group) ? "Deselect All" : "Select All") {
+                                model.toggleSelectAllButLargest(in: group)
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .disabled(model.isDeleting)
+                            .help("Select every video in this folder except the largest")
                         }
                         .help(group.directory)
                     }
@@ -127,6 +134,12 @@ struct DuplicatesView: View {
             }
 
             Spacer()
+
+            if model.hasSelection {
+                Text("\(model.selection.count) selected · \(byteString(model.selectedSize))")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
 
             Button(model.allSelected ? "Deselect All" : "Select All") {
                 model.toggleSelectAll()

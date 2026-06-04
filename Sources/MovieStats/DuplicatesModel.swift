@@ -36,6 +36,15 @@ final class DuplicatesModel {
     /// Total number of videos shown across all groups.
     var fileCount: Int { groups.reduce(0) { $0 + $1.files.count } }
 
+    /// Total bytes of the currently checked videos.
+    var selectedSize: Int64 {
+        groups.reduce(Int64(0)) { sum, group in
+            sum + group.files.reduce(Int64(0)) { groupSum, file in
+                selection.contains(file.path) ? groupSum + file.size : groupSum
+            }
+        }
+    }
+
     var allSelected: Bool {
         fileCount > 0 && selection.count == fileCount
     }
@@ -47,6 +56,26 @@ final class DuplicatesModel {
             selection.removeAll()
         } else {
             selection = Set(groups.flatMap { $0.files.map(\.path) })
+        }
+    }
+
+    /// True when every video in `group` except the largest is checked.
+    func allButLargestSelected(in group: DuplicateGroup) -> Bool {
+        let candidates = group.files.dropFirst().map(\.path)
+        guard !candidates.isEmpty else { return false }
+        return candidates.allSatisfy { selection.contains($0) }
+    }
+
+    /// Checks every video in `group` except the largest. If they're already all
+    /// checked, clears the selection for that group instead (so the button can
+    /// double as an undo).
+    func toggleSelectAllButLargest(in group: DuplicateGroup) {
+        let candidates = group.files.dropFirst().map(\.path)
+        guard !candidates.isEmpty else { return }
+        if candidates.allSatisfy({ selection.contains($0) }) {
+            for path in candidates { selection.remove(path) }
+        } else {
+            for path in candidates { selection.insert(path) }
         }
     }
 
@@ -109,8 +138,8 @@ final class DuplicatesModel {
     // MARK: - Grouping
 
     /// Buckets `files` by their first path component beneath `root`, keeping
-    /// only buckets with more than one video. Files sitting directly in `root`
-    /// are bucketed under the root folder itself.
+    /// only buckets with more than one video. Videos sitting directly in `root`
+    /// are ignored — only nested videos are considered.
     nonisolated static func group(files: [ScannedFile], root: String) -> [DuplicateGroup] {
         let rootURL = URL(fileURLWithPath: root).standardizedFileURL
         let rootComps = rootURL.pathComponents
@@ -122,13 +151,9 @@ final class DuplicatesModel {
             guard fileComps.count > rootComps.count else { continue }
             let relativeDirs = fileComps[rootComps.count..<(fileComps.count - 1)]
 
-            let groupURL: URL
-            if let first = relativeDirs.first {
-                groupURL = rootURL.appendingPathComponent(first)
-            } else {
-                // Video sits directly in the scanned root.
-                groupURL = rootURL
-            }
+            // Skip videos that live directly in the scan root.
+            guard let first = relativeDirs.first else { continue }
+            let groupURL = rootURL.appendingPathComponent(first)
             buckets[groupURL.path, default: []].append(file)
         }
 
