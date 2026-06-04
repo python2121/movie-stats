@@ -448,42 +448,69 @@ private struct MovieDetailSheet: View {
     }
 
     /// Up to this many tracks, list each one individually with its codec; past
-    /// it, fall back to a grouped-by-language count so long subtitle lists stay
+    /// it, fall back to a grouped count so long subtitle/audio lists stay
     /// readable.
     private static let detailedListThreshold = 5
 
     private var audioTracksDetail: String {
-        guard movie.audioTracks > 0 else { return "0" }
-        if movie.audioCodecs.isEmpty { return "\(movie.audioTracks)" }
-
-        if movie.audioCodecs.count <= Self.detailedListThreshold {
-            let parts = movie.audioCodecs.enumerated().map { idx, codec in
-                let lang = Self.localizedLanguage(at: idx, in: movie.audioLanguages)
-                let codecLabel = codec.isEmpty ? "?" : codec.uppercased()
-                let channels = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
-                let channelLabel = Self.channelLabel(channels)
-                return [lang, codecLabel, channelLabel]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " ")
+        Self.tracksDetail(
+            total: movie.audioTracks,
+            codecs: movie.audioCodecs,
+            languages: movie.audioLanguages,
+            codecLabeler: Self.audioCodecLabel,
+            perTrackSuffix: { idx in
+                let ch = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
+                return Self.channelLabel(ch)
             }
-            return "\(movie.audioTracks) — \(parts.joined(separator: ", "))"
-        }
-        return "\(movie.audioTracks) — \(Self.groupedByLanguage(movie.audioLanguages, totalTracks: movie.audioCodecs.count))"
+        )
     }
 
     private var subtitleTracksDetail: String {
-        guard movie.subtitleTracks > 0 else { return "0" }
-        if movie.subtitleCodecs.isEmpty { return "\(movie.subtitleTracks)" }
+        Self.tracksDetail(
+            total: movie.subtitleTracks,
+            codecs: movie.subtitleCodecs,
+            languages: movie.subtitleLanguages,
+            codecLabeler: Self.subtitleCodecLabel,
+            perTrackSuffix: { _ in "" }
+        )
+    }
 
-        if movie.subtitleCodecs.count <= Self.detailedListThreshold {
-            let parts = movie.subtitleCodecs.enumerated().map { idx, codec in
-                let lang = Self.localizedLanguage(at: idx, in: movie.subtitleLanguages)
-                let codecLabel = codec.isEmpty ? "?" : codec
-                return lang.isEmpty ? codecLabel : "\(lang) (\(codecLabel))"
+    /// Shared formatter for audio + subtitle track lists. Short lists are
+    /// shown per-track; long lists are grouped — by language when at least one
+    /// track is tagged with a real language, by codec when every track is
+    /// `und` (so the file gives us nothing to group on language-wise).
+    private static func tracksDetail(
+        total: Int,
+        codecs: [String],
+        languages: [String],
+        codecLabeler: (String) -> String,
+        perTrackSuffix: (Int) -> String
+    ) -> String {
+        guard total > 0 else { return "0" }
+        guard !codecs.isEmpty else { return "\(total)" }
+
+        if codecs.count <= detailedListThreshold {
+            let parts = codecs.enumerated().map { idx, codec in
+                let lang = localizedLanguage(at: idx, in: languages)
+                let codecLabel = codecLabeler(codec)
+                let suffix = perTrackSuffix(idx)
+                var bits: [String] = []
+                if lang != "Unknown" { bits.append(lang) }
+                bits.append(codecLabel)
+                if !suffix.isEmpty { bits.append(suffix) }
+                return bits.joined(separator: " ")
             }
-            return "\(movie.subtitleTracks) — \(parts.joined(separator: ", "))"
+            return "\(total) — \(parts.joined(separator: ", "))"
         }
-        return "\(movie.subtitleTracks) — \(Self.groupedByLanguage(movie.subtitleLanguages, totalTracks: movie.subtitleCodecs.count))"
+
+        let hasKnownLanguage = languages.contains { code in
+            let lower = code.lowercased()
+            return !lower.isEmpty && lower != "und" && lower != "unknown"
+        }
+        let grouped = hasKnownLanguage
+            ? groupedByLanguage(languages, totalTracks: codecs.count)
+            : groupedByCodec(codecs, labeler: codecLabeler)
+        return "\(total) — \(grouped)"
     }
 
     /// Groups raw ISO 639 codes into "English ×40, French ×12, Unknown ×3"
@@ -501,6 +528,53 @@ private struct MovieDetailSheet: View {
             .sorted { ($0.value, $0.key) > ($1.value, $1.key) }
             .map { "\($0.key) ×\($0.value)" }
             .joined(separator: ", ")
+    }
+
+    /// Falls back for files where every track is `und` — groups by codec so
+    /// the user still sees something useful (e.g. "SRT ×47, PGS ×16").
+    private static func groupedByCodec(_ codecs: [String], labeler: (String) -> String) -> String {
+        var counts: [String: Int] = [:]
+        for codec in codecs {
+            counts[labeler(codec), default: 0] += 1
+        }
+        return counts
+            .sorted { ($0.value, $0.key) > ($1.value, $1.key) }
+            .map { "\($0.key) ×\($0.value)" }
+            .joined(separator: ", ")
+    }
+
+    /// Friendly display names for the codec strings ffprobe emits. Falls back
+    /// to the raw value uppercased so an unknown codec is still legible.
+    private static func subtitleCodecLabel(_ codec: String) -> String {
+        switch codec.lowercased() {
+        case "subrip":             return "SRT"
+        case "hdmv_pgs_subtitle":  return "PGS"
+        case "dvd_subtitle":       return "VobSub"
+        case "ass":                return "ASS"
+        case "ssa":                return "SSA"
+        case "mov_text":           return "MOV Text"
+        case "webvtt":             return "WebVTT"
+        case "":                   return "?"
+        default:                   return codec
+        }
+    }
+
+    private static func audioCodecLabel(_ codec: String) -> String {
+        switch codec.lowercased() {
+        case "truehd":             return "TrueHD"
+        case "dts":                return "DTS"
+        case "eac3":               return "E-AC-3"
+        case "ac3":                return "AC-3"
+        case "aac":                return "AAC"
+        case "flac":               return "FLAC"
+        case "mp3":                return "MP3"
+        case "opus":               return "Opus"
+        case "vorbis":             return "Vorbis"
+        case "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le":
+            return "PCM"
+        case "":                   return "?"
+        default:                   return codec.uppercased()
+        }
     }
 
     private static func localizedLanguage(at index: Int, in languages: [String]) -> String {
@@ -649,16 +723,14 @@ private struct CategorySlice: Identifiable {
 }
 
 /// Donut chart tile showing how a metric splits across the library categories.
-/// Mousing over a slice dims the others and shows the category, raw value, and
-/// percentage in the center of the donut.
+/// The legend on the right lists each category with its raw value next to the
+/// label (count or human-readable size depending on `valueKind`).
 private struct CategoryPieCard: View {
     enum ValueKind { case count, bytes }
 
     let title: String
     let slices: [CategorySlice]
     let valueKind: ValueKind
-
-    @State private var hoveredSlice: CategorySlice?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -682,44 +754,30 @@ private struct CategoryPieCard: View {
                     )
                     .cornerRadius(2)
                     .foregroundStyle(by: .value("Category", slice.type))
-                    .opacity(hoveredSlice == nil || hoveredSlice?.id == slice.id ? 1.0 : 0.35)
                 }
                 .chartForegroundStyleScale(
                     domain: slices.map(\.type),
                     range: slices.map(\.color)
                 )
-                .chartLegend(position: .trailing, alignment: .center, spacing: 6)
-                .chartOverlay { _ in
-                    GeometryReader { geo in
-                        Rectangle()
-                            .fill(.clear)
-                            .contentShape(Rectangle())
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case .active(let point):
-                                    hoveredSlice = sliceAt(point: point, in: geo.size)
-                                case .ended:
-                                    hoveredSlice = nil
-                                }
+                .chartLegend(position: .trailing, alignment: .center, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(slices) { slice in
+                            HStack(spacing: 6) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(slice.color)
+                                    .frame(width: 8, height: 8)
+                                Text(slice.type)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 6)
+                                Text(formattedValue(slice))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
                             }
-                    }
-                }
-                .overlay {
-                    if let slice = hoveredSlice {
-                        VStack(spacing: 1) {
-                            Text(slice.type)
-                                .font(.caption.weight(.semibold))
-                                .multilineTextAlignment(.center)
-                            Text(formattedValue(slice))
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            Text(formattedPercent(slice))
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 6)
-                        .allowsHitTesting(false)
                     }
+                    .frame(width: 180)
                 }
             }
         }
@@ -728,46 +786,12 @@ private struct CategoryPieCard: View {
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// Maps a hover position inside the chart's plot rectangle to a slice by
-    /// computing the angle from the center clockwise from 12 o'clock — the
-    /// same layout SwiftUI Charts uses for `SectorMark`.
-    private func sliceAt(point: CGPoint, in size: CGSize) -> CategorySlice? {
-        guard !slices.isEmpty else { return nil }
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let dx = point.x - center.x
-        let dy = point.y - center.y
-        let radius = sqrt(dx * dx + dy * dy)
-        let maxRadius = min(size.width, size.height) / 2 * 1.05
-        guard radius <= maxRadius else { return nil }
-
-        var angle = atan2(dx, -dy) * 180 / .pi
-        if angle < 0 { angle += 360 }
-
-        let total = slices.reduce(0.0) { $0 + $1.value }
-        guard total > 0 else { return nil }
-
-        var cumulative: Double = 0
-        for slice in slices {
-            let sweep = (slice.value / total) * 360
-            if angle <= cumulative + sweep { return slice }
-            cumulative += sweep
-        }
-        return slices.last
-    }
-
     private func formattedValue(_ slice: CategorySlice) -> String {
         switch valueKind {
         case .count:
-            let n = Int(slice.value)
-            return "\(n) movie\(n == 1 ? "" : "s")"
+            return "\(Int(slice.value))"
         case .bytes:
             return ByteCountFormatter.string(fromByteCount: Int64(slice.value), countStyle: .file)
         }
-    }
-
-    private func formattedPercent(_ slice: CategorySlice) -> String {
-        let total = slices.reduce(0.0) { $0 + $1.value }
-        guard total > 0 else { return "" }
-        return String(format: "%.1f%%", slice.value / total * 100)
     }
 }

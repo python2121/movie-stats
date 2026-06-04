@@ -12,7 +12,9 @@ struct MovieStatsApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
-            CommandGroup(after: .saveItem) {
+            // Anchored to .newItem so the entry appears near the top of the
+            // File menu, above Close.
+            CommandGroup(after: .newItem) {
                 Button("Export Library to CSV…") {
                     exportLibraryCSV()
                 }
