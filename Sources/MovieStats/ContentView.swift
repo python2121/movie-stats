@@ -14,6 +14,12 @@ struct ContentView: View {
     @State private var sortMode: SortMode = .sizeDescending
     @State private var selectedTypes: Set<String> = []  // empty = all
     @State private var chatOpen = false
+    /// Persisted between launches so the panel re-opens at the user's last
+    /// chosen width.
+    @AppStorage("aiPanelWidth") private var panelWidth: Double = 380
+    /// Floor/ceiling guard rails for the side panel's resizable width.
+    private static let panelMinWidth: Double = 280
+    private static let panelMaxWidth: Double = 900
 
     enum SortMode: String, CaseIterable, Identifiable {
         case sizeDescending = "Largest First"
@@ -26,10 +32,18 @@ struct ContentView: View {
             mainColumn
 
             if chatOpen {
-                Divider()
-                ChatPanel(model: chatModel) { chatOpen = false }
-                    .frame(width: 380)
-                    .transition(.move(edge: .trailing))
+                HStack(spacing: 0) {
+                    ResizeHandle(
+                        currentWidth: panelWidth,
+                        onResize: { proposed in
+                            panelWidth = max(Self.panelMinWidth, min(Self.panelMaxWidth, proposed))
+                        },
+                        onDragEnded: {}
+                    )
+                    ChatPanel(model: chatModel) { chatOpen = false }
+                        .frame(width: panelWidth)
+                }
+                .transition(.move(edge: .trailing))
             }
         }
         .animation(.easeInOut(duration: 0.22), value: chatOpen)

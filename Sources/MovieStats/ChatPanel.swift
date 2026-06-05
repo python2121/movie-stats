@@ -1,3 +1,4 @@
+import MarkdownUI
 import SwiftUI
 
 /// The right-side "Ask Claude" panel. Renders the chat transcript, the
@@ -6,6 +7,8 @@ import SwiftUI
 struct ChatPanel: View {
     @Bindable var model: ChatModel
     let onClose: () -> Void
+
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,6 +26,13 @@ struct ChatPanel: View {
         }
         .frame(maxHeight: .infinity)
         .background(.windowBackground)
+        .onAppear {
+            // Brief delay gives the panel's slide-in animation a moment to
+            // settle before SwiftUI accepts the focus assignment.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                inputFocused = true
+            }
+        }
     }
 
     // MARK: - Header
@@ -133,30 +143,17 @@ struct ChatPanel: View {
             }
             .padding(.horizontal, 12)
         case .assistant:
-            VStack(alignment: .leading) {
-                Text(renderMarkdown(message.text))
-                    .textSelection(.enabled)
-            }
-            .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Markdown(message.text)
+                .markdownTheme(.chatTheme)
+                .textSelection(.enabled)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
         case .system:
             Label(message.text, systemImage: "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .padding(.horizontal, 14)
         }
-    }
-
-    /// Lets SwiftUI render Markdown inline (tables, code, bold) when the
-    /// string parses cleanly, otherwise falls back to a plain string.
-    private func renderMarkdown(_ source: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        if let attr = try? AttributedString(markdown: source, options: options) {
-            return attr
-        }
-        return AttributedString(source)
     }
 
     // MARK: - Missing CLI fallback
@@ -189,6 +186,7 @@ struct ChatPanel: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                .focused($inputFocused)
                 .onSubmit { model.send() }
                 .disabled(model.isStreaming)
 
