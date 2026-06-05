@@ -147,6 +147,13 @@ struct ContentView: View {
                             .help(entry.movie.path)
                             .contentShape(Rectangle())
                             .onTapGesture { selectedMovie = entry.movie }
+                            .contextMenu {
+                                Button("Reveal in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting(
+                                        [URL(fileURLWithPath: entry.movie.path)]
+                                    )
+                                }
+                            }
                         }
                     }
                     .listStyle(.inset(alternatesRowBackgrounds: true))

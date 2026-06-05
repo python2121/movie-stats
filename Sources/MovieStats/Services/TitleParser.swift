@@ -19,11 +19,12 @@ import Foundation
 /// (`Honey, I Shrunk The Kids 1989`), and missing-year cases
 /// (`Demolition.Man.BluRay.1080p…`).
 enum TitleParser {
-    /// 4-digit release year (1900–2099) flanked by non-digit, non-letter
-    /// characters so `1980s`, `198912`, and `Mar1980` don't false-match.
-    /// Year is split into century + decade groups so we can reassemble it.
+    /// 4-digit release year (1900–2099) flanked on both sides by non-letter,
+    /// non-digit characters so `1980s`, `198912`, `Mar1980`, and `EDGE2020`
+    /// (release-group + counter glued together) don't false-match. Year is
+    /// split into century + decade groups so we can reassemble it.
     private static let yearRegex = try! NSRegularExpression(
-        pattern: #"(?<!\d)(19|20)(\d{2})(?![\p{L}\d])"#
+        pattern: #"(?<![\p{L}\d])(19|20)(\d{2})(?![\p{L}\d])"#
     )
 
     /// Repeated leading `[group]` / `{group}` release-group tags.
