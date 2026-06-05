@@ -44,6 +44,28 @@ enum ClaudeCodeRunner {
         return nil
     }
 
+    /// Creates (if needed) and returns an empty workspace directory we point
+    /// `claude` at — keeps Claude Code's project-scope from spanning the
+    /// user's home and triggering unrelated TCC / trust prompts.
+    private static func ensureWorkspaceDirectory() -> URL? {
+        let fm = FileManager.default
+        guard let support = try? fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) else { return nil }
+        let workspace = support
+            .appendingPathComponent("MovieStats", isDirectory: true)
+            .appendingPathComponent("claude-workspace", isDirectory: true)
+        do {
+            try fm.createDirectory(at: workspace, withIntermediateDirectories: true)
+            return workspace
+        } catch {
+            return nil
+        }
+    }
+
     /// Falls back to a login-shell `which claude` so user-specific PATH
     /// additions (nvm, asdf, etc.) are picked up.
     private static func whichClaude() -> String? {
@@ -118,6 +140,15 @@ enum ClaudeCodeRunner {
                 args.append(contentsOf: ["--resume", sessionId])
             }
             process.arguments = args
+
+            // Pin the subprocess's working directory to a controlled, empty
+            // folder we own. Without this, claude inherits the GUI app's CWD
+            // (typically `/` for Finder/Spotlight launches), uses it as the
+            // workspace root, and triggers TCC + trust prompts for every
+            // protected directory it discovers in scope.
+            if let workspace = ensureWorkspaceDirectory() {
+                process.currentDirectoryURL = workspace
+            }
 
             let stdout = Pipe()
             let stderr = Pipe()
