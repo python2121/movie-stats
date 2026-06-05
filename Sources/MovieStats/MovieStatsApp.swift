@@ -4,11 +4,13 @@ import SwiftUI
 @main
 struct MovieStatsApp: App {
     @State private var model = AppModel()
+    @State private var chatModel = ChatModel()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(model)
+                .environment(chatModel)
         }
         .windowResizability(.contentMinSize)
         .commands {

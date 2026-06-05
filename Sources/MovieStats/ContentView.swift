@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(ChatModel.self) private var chatModel
     @Environment(\.openWindow) private var openWindow
 
     @State private var searchText = ""
@@ -12,6 +13,7 @@ struct ContentView: View {
     @State private var selectedMovie: MovieFile?
     @State private var sortMode: SortMode = .sizeDescending
     @State private var selectedTypes: Set<String> = []  // empty = all
+    @State private var chatOpen = false
 
     enum SortMode: String, CaseIterable, Identifiable {
         case sizeDescending = "Largest First"
@@ -20,6 +22,34 @@ struct ContentView: View {
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            mainColumn
+
+            if chatOpen {
+                Divider()
+                ChatPanel(model: chatModel) { chatOpen = false }
+                    .frame(width: 380)
+                    .transition(.move(edge: .trailing))
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: chatOpen)
+        .toolbar { toolbarContent }
+        .sheet(isPresented: Binding(
+            get: { model.isScanning || model.isProbing },
+            set: { _ in }
+        )) {
+            ScanProgressSheet()
+                .environment(model)
+        }
+        .sheet(item: $selectedMovie) { movie in
+            MovieDetailSheet(movie: movie) { selectedMovie = nil }
+                .background(DismissOnOutsideClick {
+                    Task { @MainActor in selectedMovie = nil }
+                })
+        }
+    }
+
+    private var mainColumn: some View {
         VStack(alignment: .leading, spacing: 24) {
             header
 
@@ -50,17 +80,7 @@ struct ContentView: View {
         }
         .padding(28)
         .frame(minWidth: 600, minHeight: 380)
-        .toolbar { toolbarContent }
-        .sheet(isPresented: Binding(
-            get: { model.isScanning || model.isProbing },
-            set: { _ in }
-        )) {
-            ScanProgressSheet()
-                .environment(model)
-        }
-        .sheet(item: $selectedMovie) { movie in
-            MovieDetailSheet(movie: movie)
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Subviews
@@ -429,6 +449,13 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Find folders that contain no files")
+
+            Button {
+                chatOpen.toggle()
+            } label: {
+                Label("Query the AI God", systemImage: "sparkles")
+            }
+            .help(chatOpen ? "Close the AI God panel" : "Query the AI God")
         }
     }
 
@@ -453,11 +480,12 @@ struct ContentView: View {
 }
 
 /// In-window detail popup. Shows every metadata field we've collected for the
-/// selected movie in an aligned two-column grid. Triggered by clicking a row
-/// in the main movie list.
+/// selected movie in an aligned two-column grid, with audio + subtitle tracks
+/// broken out into their own tables below. Triggered by clicking a row in the
+/// main movie list; dismisses on click-outside, Escape, or Done.
 private struct MovieDetailSheet: View {
     let movie: MovieFile
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -485,23 +513,34 @@ private struct MovieDetailSheet: View {
             Divider()
 
             ScrollView {
-                Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 8) {
-                    detailRow("Type", movie.movieType ?? "—")
-                    detailRow("Size", ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file))
-                    detailRow("Resolution", resolutionText)
-                    detailRow("Duration", durationText)
-                    detailRow("Bitrate", bitrateText)
-                    detailRow("Video Codec", (movie.videoCodec ?? "—").uppercased())
-                    detailRow("Container", movie.container ?? "—")
-                    detailRow("Pixel Format", movie.pixFmt ?? "—")
-                    detailRow("Bit Depth", movie.is10Bit ? "10-bit" : "8-bit")
-                    detailRow("HDR", movie.hdrFormat ?? "—")
-                    detailRow("Dolby Vision", movie.hasDolbyVision ? "Yes" : "No")
-                    detailRow("Video Tracks", String(movie.videoTracks))
-                    detailRow("Audio Tracks", audioTracksDetail)
-                    detailRow("Subtitle Tracks", subtitleTracksDetail)
-                    detailRow("Last Scanned", dateText(movie.dateScanned))
-                    detailRow("Last Probed", movie.probedAt.map(dateText) ?? "—")
+                VStack(alignment: .leading, spacing: 18) {
+                    Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 8) {
+                        detailRow("Type", movie.movieType ?? "—")
+                        detailRow("Size", ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file))
+                        detailRow("Resolution", resolutionText)
+                        detailRow("Duration", durationText)
+                        detailRow("Bitrate", bitrateText)
+                        detailRow("Video Codec", (movie.videoCodec ?? "—").uppercased())
+                        detailRow("Container", movie.container ?? "—")
+                        detailRow("Pixel Format", movie.pixFmt ?? "—")
+                        detailRow("Bit Depth", movie.is10Bit ? "10-bit" : "8-bit")
+                        detailRow("HDR", movie.hdrFormat ?? "—")
+                        detailRow("Dolby Vision", movie.hasDolbyVision ? "Yes" : "No")
+                        detailRow("Video Tracks", String(movie.videoTracks))
+                        detailRow("Audio Tracks", String(movie.audioTracks))
+                        detailRow("Subtitle Tracks", String(movie.subtitleTracks))
+                        detailRow("Last Scanned", dateText(movie.dateScanned))
+                        detailRow("Last Probed", movie.probedAt.map(dateText) ?? "—")
+                    }
+
+                    if !movie.audioCodecs.isEmpty {
+                        Divider()
+                        audioTracksTable
+                    }
+                    if !movie.subtitleCodecs.isEmpty {
+                        Divider()
+                        subtitleTracksTable
+                    }
                 }
                 .padding(.vertical, 14)
             }
@@ -511,14 +550,93 @@ private struct MovieDetailSheet: View {
 
             HStack {
                 Spacer()
-                Button("Done") { dismiss() }
+                Button("Done") { onClose() }
                     .keyboardShortcut(.defaultAction)
             }
             .padding(.top, 12)
         }
         .padding(28)
         .frame(width: 760)
-        .onExitCommand { dismiss() }
+        .onExitCommand { onClose() }
+    }
+
+    // MARK: - Track tables
+
+    /// Per-track audio table: index, language, codec, channels. One row per
+    /// stream — never collapsed, scrolls naturally inside the parent ScrollView.
+    private var audioTracksTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Audio")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                GridRow {
+                    Text("#").gridColumnAlignment(.trailing)
+                    Text("Language")
+                    Text("Codec")
+                    Text("Channels")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                Divider().gridCellUnsizedAxes(.horizontal)
+
+                ForEach(Array(movie.audioCodecs.enumerated()), id: \.offset) { idx, codec in
+                    GridRow {
+                        Text("\(idx + 1)")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Text(Self.localizedLanguage(at: idx, in: movie.audioLanguages))
+                        Text(Self.audioCodecLabel(codec))
+                        Text(audioChannelText(at: idx))
+                            .font(.callout.monospacedDigit())
+                    }
+                    .font(.callout)
+                    .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    /// Per-track subtitle table: index, language, codec. Compact, no channel
+    /// column since subtitles don't have one.
+    private var subtitleTracksTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Subtitles")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                GridRow {
+                    Text("#").gridColumnAlignment(.trailing)
+                    Text("Language")
+                    Text("Codec")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                Divider().gridCellUnsizedAxes(.horizontal)
+
+                ForEach(Array(movie.subtitleCodecs.enumerated()), id: \.offset) { idx, codec in
+                    GridRow {
+                        Text("\(idx + 1)")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Text(Self.localizedLanguage(at: idx, in: movie.subtitleLanguages))
+                        Text(Self.subtitleCodecLabel(codec))
+                    }
+                    .font(.callout)
+                    .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func audioChannelText(at idx: Int) -> String {
+        let channels = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
+        let label = Self.channelLabel(channels)
+        return label.isEmpty ? "—" : label
     }
 
     @ViewBuilder
