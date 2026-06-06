@@ -89,6 +89,41 @@ struct TMDBCollection: Codable, Sendable, Hashable {
     }
 }
 
+// MARK: - Per-country release dates
+
+/// One entry in `/movie/{id}/release_dates`'s nested `release_dates` array.
+/// `type` codes: 1=Premiere, 2=Theatrical limited, 3=Theatrical, 4=Digital,
+/// 5=Physical, 6=TV.
+struct TMDBReleaseDate: Codable, Sendable, Hashable {
+    let certification: String?
+    let iso6391: String?
+    let note: String?
+    let releaseDate: String?
+    let type: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case certification, note, type
+        case iso6391 = "iso_639_1"
+        case releaseDate = "release_date"
+    }
+}
+
+struct TMDBReleaseDateGroup: Codable, Sendable, Hashable {
+    let iso31661: String
+    let releaseDates: [TMDBReleaseDate]
+
+    enum CodingKeys: String, CodingKey {
+        case iso31661 = "iso_3166_1"
+        case releaseDates = "release_dates"
+    }
+}
+
+/// Top-level shape returned by `append_to_response=release_dates`. Wrapped in
+/// a `results` array keyed by country.
+struct TMDBReleaseDates: Codable, Sendable, Hashable {
+    let results: [TMDBReleaseDateGroup]
+}
+
 /// Full /movie/{id} response. Everything optional except `id` and `title`
 /// because TMDB is loose about which fields it returns for sparser titles.
 struct TMDBMovieDetail: Codable, Sendable, Hashable {
@@ -117,6 +152,11 @@ struct TMDBMovieDetail: Codable, Sendable, Hashable {
     let productionCountries: [TMDBCountry]?
     let spokenLanguages: [TMDBLanguage]?
     let belongsToCollection: TMDBCollection?
+    /// Per-country release dates from `append_to_response=release_dates` — lets
+    /// us pick the US theatrical release year instead of TMDB's
+    /// country-of-origin `release_date`, which is often a festival premiere
+    /// a year earlier for foreign films.
+    let releaseDates: TMDBReleaseDates?
 
     enum CodingKeys: String, CodingKey {
         case id, title, tagline, overview, runtime, status, budget, revenue
@@ -133,10 +173,43 @@ struct TMDBMovieDetail: Codable, Sendable, Hashable {
         case productionCountries = "production_countries"
         case spokenLanguages = "spoken_languages"
         case belongsToCollection = "belongs_to_collection"
+        case releaseDates = "release_dates"
+    }
+
+    /// The most user-meaningful release date for this title — US theatrical
+    /// when available, otherwise any country's theatrical / limited release,
+    /// falling back to TMDB's top-level `release_date`. Solves the "TMDB is
+    /// behind by one year" issue for foreign films whose origin-country
+    /// premiere predates their US wide release.
+    var preferredReleaseDate: String? {
+        let groups = releaseDates?.results ?? []
+        let theatrical = 3   // wide theatrical
+        let limited = 2      // limited theatrical
+
+        if let us = groups.first(where: { $0.iso31661 == "US" }) {
+            if let d = us.releaseDates.first(where: { $0.type == theatrical })?.releaseDate, !d.isEmpty {
+                return d
+            }
+            if let d = us.releaseDates.first(where: { $0.type == limited })?.releaseDate, !d.isEmpty {
+                return d
+            }
+        }
+        for group in groups {
+            if let d = group.releaseDates.first(where: { $0.type == theatrical })?.releaseDate, !d.isEmpty {
+                return d
+            }
+        }
+        for group in groups {
+            if let d = group.releaseDates.first(where: { $0.type == limited })?.releaseDate, !d.isEmpty {
+                return d
+            }
+        }
+        return releaseDate
     }
 
     var year: String? {
-        guard let date = releaseDate, date.count >= 4 else { return nil }
+        let source = preferredReleaseDate ?? releaseDate
+        guard let date = source, date.count >= 4 else { return nil }
         return String(date.prefix(4))
     }
 
@@ -217,7 +290,11 @@ enum TMDBService {
             URLQueryItem(name: "language", value: "en-US"),
         ]
         if let year {
-            items.append(URLQueryItem(name: "primary_release_year", value: String(year)))
+            // `year` matches *any* release year, not just primary — important
+            // because TMDB's primary year is the country-of-origin release,
+            // which can be a year earlier than the US/wide release that the
+            // filenames in this app typically encode.
+            items.append(URLQueryItem(name: "year", value: String(year)))
         }
 
         let request = makeRequest(components: &components, items: items, key: key)
@@ -240,6 +317,10 @@ enum TMDBService {
         var components = URLComponents(string: "https://api.themoviedb.org/3/movie/\(id)")!
         let items: [URLQueryItem] = [
             URLQueryItem(name: "language", value: "en-US"),
+            // Free piggy-back in the same request — used to derive the
+            // displayed year (preferring US theatrical) and persisted so the
+            // detail sheet doesn't need a re-fetch.
+            URLQueryItem(name: "append_to_response", value: "release_dates"),
         ]
         let request = makeRequest(components: &components, items: items, key: key)
 

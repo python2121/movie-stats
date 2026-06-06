@@ -129,6 +129,22 @@ final class MovieStore {
             );
             """)
 
+        // Additive migration for the per-country release dates payload so
+        // older databases keep working without a re-confirm.
+        var tmdbCols = Set<String>()
+        var ts: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(tmdb_movies);", -1, &ts, nil) == SQLITE_OK {
+            while sqlite3_step(ts) == SQLITE_ROW {
+                if let c = sqlite3_column_text(ts, 1) {
+                    tmdbCols.insert(String(cString: c))
+                }
+            }
+            sqlite3_finalize(ts)
+        }
+        if !tmdbCols.contains("release_dates_json") {
+            try exec("ALTER TABLE tmdb_movies ADD COLUMN release_dates_json TEXT;")
+        }
+
         if needsTitleBackfill {
             try backfillParsedTitles()
         }
@@ -382,8 +398,9 @@ final class MovieStore {
                 adult, video, backdrop_path, poster_path, homepage,
                 genres_json, production_companies_json, production_countries_json,
                 spoken_languages_json, belongs_to_collection_json,
+                release_dates_json,
                 matched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -416,7 +433,8 @@ final class MovieStore {
         bindJSON(stmt, 23, detail.productionCountries)
         bindJSON(stmt, 24, detail.spokenLanguages)
         bindJSON(stmt, 25, detail.belongsToCollection)
-        sqlite3_bind_double(stmt, 26, Date().timeIntervalSince1970)
+        bindJSON(stmt, 26, detail.releaseDates)
+        sqlite3_bind_double(stmt, 27, Date().timeIntervalSince1970)
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw MovieStoreError.exec(lastErrorMessage())
@@ -432,7 +450,8 @@ final class MovieStore {
                    budget, revenue, popularity, vote_average, vote_count,
                    adult, video, backdrop_path, poster_path, homepage,
                    genres_json, production_companies_json, production_countries_json,
-                   spoken_languages_json, belongs_to_collection_json
+                   spoken_languages_json, belongs_to_collection_json,
+                   release_dates_json
             FROM tmdb_movies WHERE tmdb_id = ?;
             """
         var stmt: OpaquePointer?
@@ -468,7 +487,8 @@ final class MovieStore {
             productionCompanies: decodeJSON(readNullableText(stmt, 21)),
             productionCountries: decodeJSON(readNullableText(stmt, 22)),
             spokenLanguages: decodeJSON(readNullableText(stmt, 23)),
-            belongsToCollection: decodeJSON(readNullableText(stmt, 24))
+            belongsToCollection: decodeJSON(readNullableText(stmt, 24)),
+            releaseDates: decodeJSON(readNullableText(stmt, 25))
         )
     }
 

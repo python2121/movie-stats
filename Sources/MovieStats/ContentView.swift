@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var selectedMovie: MovieFile?
     @State private var sortMode: SortMode = .sizeDescending
     @State private var selectedTypes: Set<String> = []  // empty = all
+    @State private var matchFilter: MatchFilter = .all
     @State private var chatOpen = false
     /// Persisted between launches so the panel re-opens at the user's last
     /// chosen width. Default = `panelMinWidth` so a fresh install opens at
@@ -53,6 +54,15 @@ struct ContentView: View {
     enum SortMode: String, CaseIterable, Identifiable {
         case sizeDescending = "Largest First"
         case titleAscending = "Title A→Z"
+        var id: String { rawValue }
+    }
+
+    /// Filters the main list by whether a file has been matched to a TMDB
+    /// record. Driven by `MovieFile.tmdbId`.
+    enum MatchFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case matched = "Matched"
+        case unmatched = "Unmatched"
         var id: String { rawValue }
     }
 
@@ -194,6 +204,7 @@ struct ContentView: View {
                     Spacer()
                     sortMenu
                     typeFilterMenu
+                    matchFilterMenu
                     searchControl
                 }
 
@@ -395,13 +406,23 @@ struct ContentView: View {
             }
         }
 
+        let matchFiltered: [MovieFile]
+        switch matchFilter {
+        case .all:
+            matchFiltered = typeFiltered
+        case .matched:
+            matchFiltered = typeFiltered.filter { $0.tmdbId != nil }
+        case .unmatched:
+            matchFiltered = typeFiltered.filter { $0.tmdbId == nil }
+        }
+
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let final: [MovieFile]
         if trimmed.isEmpty {
-            final = typeFiltered
+            final = matchFiltered
         } else {
             let needle = trimmed.lowercased()
-            final = typeFiltered.filter {
+            final = matchFiltered.filter {
                 $0.displayTitle.lowercased().contains(needle)
                     || $0.filename.lowercased().contains(needle)
             }
@@ -426,6 +447,30 @@ struct ContentView: View {
             }
         } label: {
             Label("Sort: \(sortMode.rawValue)", systemImage: "arrow.up.arrow.down")
+                .font(.callout)
+                .labelStyle(.titleAndIcon)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    /// TMDB-match filter — All / Matched / Unmatched. Single-select; mirrors
+    /// the sort menu's visual style.
+    private var matchFilterMenu: some View {
+        Menu {
+            ForEach(MatchFilter.allCases) { option in
+                Button {
+                    matchFilter = option
+                } label: {
+                    if option == matchFilter {
+                        Label(option.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(option.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Label("TMDB: \(matchFilter.rawValue)", systemImage: "popcorn")
                 .font(.callout)
                 .labelStyle(.titleAndIcon)
         }

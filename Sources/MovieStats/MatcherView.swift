@@ -204,7 +204,7 @@ struct MatcherView: View {
     private func rightCell(for row: MatcherModel.Row) -> some View {
         if let candidate = row.candidate {
             VStack(alignment: .leading, spacing: 1) {
-                Text(candidate.displayTitle)
+                Text(row.candidateDisplayTitle)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .foregroundStyle(row.isExactMatch ? Color.green : Color.primary)

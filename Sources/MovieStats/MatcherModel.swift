@@ -1,5 +1,62 @@
 import Foundation
 
+/// Tiny string-similarity helper used by the matcher to recognize
+/// near-identical titles (e.g. "Mr & Mrs Smith" vs "Mr. and Mrs. Smith")
+/// where TMDB and the filename agree on the film but punctuation drifts.
+/// Returns a normalized Levenshtein ratio in [0, 1].
+private enum TitleSimilarity {
+    /// Strips punctuation, collapses whitespace, lowercases. Leaves the bytes
+    /// the actual title carries — no aggressive stemming or stop-word removal.
+    static func normalize(_ s: String) -> String {
+        let lower = s.lowercased()
+        var scalars = String.UnicodeScalarView()
+        var prevWasSpace = false
+        for scalar in lower.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                scalars.append(scalar)
+                prevWasSpace = false
+            } else if CharacterSet.whitespacesAndNewlines.contains(scalar) || scalar == "-" || scalar == "_" {
+                if !prevWasSpace, !scalars.isEmpty {
+                    scalars.append(" ")
+                    prevWasSpace = true
+                }
+            }
+            // Other punctuation (periods, ampersands, commas, …) is dropped.
+        }
+        var out = String(scalars)
+        if out.hasSuffix(" ") { out.removeLast() }
+        return out
+    }
+
+    /// Normalized similarity. 1.0 = identical after normalization.
+    static func ratio(_ a: String, _ b: String) -> Double {
+        let lhs = normalize(a)
+        let rhs = normalize(b)
+        if lhs == rhs { return 1.0 }
+        let lhsChars = Array(lhs)
+        let rhsChars = Array(rhs)
+        let n = lhsChars.count
+        let m = rhsChars.count
+        if n == 0 || m == 0 { return 0.0 }
+
+        var prev = Array(0...m)
+        var curr = [Int](repeating: 0, count: m + 1)
+        for i in 1...n {
+            curr[0] = i
+            for j in 1...m {
+                let cost = lhsChars[i - 1] == rhsChars[j - 1] ? 0 : 1
+                curr[j] = Swift.min(
+                    curr[j - 1] + 1,
+                    prev[j] + 1,
+                    prev[j - 1] + cost
+                )
+            }
+            swap(&prev, &curr)
+        }
+        return 1.0 - Double(prev[m]) / Double(Swift.max(n, m))
+    }
+}
+
 /// Backs the "Match Library to TMDB" window. Builds a working table of every
 /// unmatched movie, scans them top-to-bottom against TMDB, lets the user
 /// override picks via a manual-search sheet, then writes everything to the
@@ -19,15 +76,47 @@ final class MatcherModel {
         /// Whether this row will be written on Confirm. Lets the user work
         /// through a long list in batches — leave unchecked rows for later.
         var included: Bool = false
+        /// Year to display for the candidate when it differs from
+        /// `candidate.year`. Populated by scan when TMDB's primary
+        /// release year disagrees with the filename year — the scanner
+        /// then fetches `/movie/{id}` with `append_to_response=release_dates`
+        /// and stores the US-theatrical year here. Fixes the off-by-one
+        /// shown for foreign films whose origin-country premiere predates
+        /// their US wide release.
+        var preferredYear: String?
 
         var id: String { path }
 
-        /// True when the TMDB candidate's "Title (Year)" string equals the
-        /// file's parsed displayTitle exactly — used by the matcher to
-        /// highlight high-confidence picks in green.
+        /// The candidate's title with the most user-meaningful year applied —
+        /// `preferredYear` when present, otherwise TMDB's primary
+        /// `release_date` year.
+        var candidateDisplayTitle: String {
+            guard let candidate else { return "" }
+            let year = preferredYear ?? candidate.year
+            if let year { return "\(candidate.title) (\(year))" }
+            return candidate.title
+        }
+
+        /// Confidence threshold (per-character normalized Levenshtein) above
+        /// which a same-year candidate is treated as a confident match.
+        static let fuzzyTitleThreshold: Double = 0.80
+
+        /// True when the candidate is a confident match for this file:
+        /// either the "Title (Year)" strings agree exactly, or the years
+        /// agree and the titles are at least `fuzzyTitleThreshold` similar.
+        /// Drives green text and the initial auto-include state.
         var isExactMatch: Bool {
             guard let candidate else { return false }
-            return candidate.displayTitle == displayTitle
+            if candidateDisplayTitle == displayTitle { return true }
+
+            // Same-year + close-enough title fuzzy path. Catches punctuation
+            // drift like "Mr & Mrs" vs "Mr. and Mrs.", "WALL-E" vs "WALL·E",
+            // "Spider-Man: Homecoming" vs "Spider Man Homecoming", etc.
+            guard let parsedYear,
+                  let candYearStr = preferredYear ?? candidate.year,
+                  let candYear = Int(candYearStr),
+                  parsedYear == candYear else { return false }
+            return TitleSimilarity.ratio(parsedTitle, candidate.title) >= Self.fuzzyTitleThreshold
         }
 
         enum Status: Equatable {
@@ -116,7 +205,22 @@ final class MatcherModel {
                     year: row.parsedYear
                 )
                 if let first = results.first {
+                    // If the parsed filename year disagrees with TMDB's
+                    // primary year on the top hit, fetch details to get the
+                    // US-theatrical year — fixes the off-by-one for foreign
+                    // films. Only one extra HTTP call per mismatched row;
+                    // matching-year rows pay nothing.
+                    var preferredYear: String?
+                    if let parsedYear = row.parsedYear,
+                       let searchYearStr = first.year,
+                       let searchYear = Int(searchYearStr),
+                       parsedYear != searchYear,
+                       let detail = try? await TMDBService.details(forID: first.id) {
+                        preferredYear = detail.year
+                    }
+
                     rows[index].candidate = first
+                    rows[index].preferredYear = preferredYear
                     rows[index].status = .matched
                     rows[index].failureReason = nil
                     // Only auto-include exact matches; everything else
@@ -124,12 +228,14 @@ final class MatcherModel {
                     rows[index].included = rows[index].isExactMatch
                 } else {
                     rows[index].candidate = nil
+                    rows[index].preferredYear = nil
                     rows[index].status = .failed
                     rows[index].failureReason = "No TMDB result"
                     rows[index].included = false
                 }
             } catch {
                 rows[index].candidate = nil
+                rows[index].preferredYear = nil
                 rows[index].status = .failed
                 rows[index].failureReason = error.localizedDescription
                 rows[index].included = false
@@ -142,9 +248,12 @@ final class MatcherModel {
 
     /// Replaces the candidate for one row with a manually-picked TMDB result.
     /// Manual picks count as explicit endorsement, so they're auto-included.
+    /// The preferred-year override is dropped — it belonged to the previous
+    /// candidate.
     func setCandidate(_ candidate: TMDBMovie, for rowID: Row.ID) {
         guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return }
         rows[idx].candidate = candidate
+        rows[idx].preferredYear = nil
         rows[idx].status = .matched
         rows[idx].failureReason = nil
         rows[idx].included = true
@@ -155,6 +264,7 @@ final class MatcherModel {
     func clearCandidate(for rowID: Row.ID) {
         guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return }
         rows[idx].candidate = nil
+        rows[idx].preferredYear = nil
         rows[idx].status = .pending
         rows[idx].failureReason = nil
         rows[idx].included = false
@@ -208,6 +318,7 @@ final class MatcherModel {
         defer { isConfirming = false }
 
         var detailCache: [Int: TMDBMovieDetail] = [:]
+        var confirmedPaths: Set<String> = []
         let total = matched.count
 
         for (offset, entry) in matched.enumerated() {
@@ -237,11 +348,21 @@ final class MatcherModel {
                 )
 
                 try appModel.store?.setTMDBMatch(forPath: entry.path, tmdbID: tmdbID)
+                confirmedPaths.insert(entry.path)
             } catch {
                 lastError = "\(entry.candidate.title): \(error.localizedDescription)"
             }
         }
         progress = 1
+
+        // Drop just-confirmed rows from the working list so the matcher only
+        // shows what's still unmatched. Rows that failed to write stay put
+        // with their candidate intact so the user can retry without
+        // re-picking.
+        if !confirmedPaths.isEmpty {
+            rows.removeAll { confirmedPaths.contains($0.path) }
+        }
+        currentIndex = nil
 
         // Pull the freshly-tagged rows back into the AppModel so the main
         // library checkmark column updates immediately.
