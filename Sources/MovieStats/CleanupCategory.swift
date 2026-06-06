@@ -36,7 +36,7 @@ struct CleanupCategory: Identifiable, Hashable {
         id: "text",
         title: "Text & NFO Files",
         noun: "file",
-        extensions: ["txt", "nfo"],
+        extensions: ["txt", "nfo", "rtf"],
         preview: .text
     )
 }
