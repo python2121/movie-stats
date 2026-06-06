@@ -23,6 +23,11 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// Release year if `TitleParser` found one in the filename.
     var parsedYear: Int?
 
+    /// TMDB id this file is matched to, or nil if it hasn't been matched yet.
+    /// When non-nil, the full TMDB detail lives in the `tmdb_movies` table —
+    /// look it up via `MovieStore.tmdbDetail(forID:)`.
+    var tmdbId: Int?
+
     /// `"Title (Year)"` when both are available; otherwise just the title.
     /// Falls back to the filename if parsing produced nothing.
     var displayTitle: String {

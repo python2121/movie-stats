@@ -90,11 +90,44 @@ final class MovieStore {
             ("subtitle_languages", "TEXT"),
             ("movie_type", "TEXT"),
             ("probed_at", "REAL"),
+            ("tmdb_id", "INTEGER"),
         ]
         for col in columns where !present.contains(col.name) {
             try exec("ALTER TABLE movies ADD COLUMN \(col.name) \(col.ddl);")
         }
         try exec("CREATE INDEX IF NOT EXISTS idx_movies_type ON movies(movie_type);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_movies_tmdb_id ON movies(tmdb_id);")
+
+        try exec("""
+            CREATE TABLE IF NOT EXISTS tmdb_movies (
+                tmdb_id                    INTEGER PRIMARY KEY,
+                imdb_id                    TEXT,
+                title                      TEXT NOT NULL,
+                original_title             TEXT,
+                original_language          TEXT,
+                tagline                    TEXT,
+                overview                   TEXT,
+                release_date               TEXT,
+                runtime                    INTEGER,
+                status                     TEXT,
+                budget                     INTEGER,
+                revenue                    INTEGER,
+                popularity                 REAL,
+                vote_average               REAL,
+                vote_count                 INTEGER,
+                adult                      INTEGER,
+                video                      INTEGER,
+                backdrop_path              TEXT,
+                poster_path                TEXT,
+                homepage                   TEXT,
+                genres_json                TEXT,
+                production_companies_json  TEXT,
+                production_countries_json  TEXT,
+                spoken_languages_json      TEXT,
+                belongs_to_collection_json TEXT,
+                matched_at                 REAL NOT NULL
+            );
+            """)
 
         if needsTitleBackfill {
             try backfillParsedTitles()
@@ -223,7 +256,8 @@ final class MovieStore {
                    audio_codecs, audio_channels, audio_languages,
                    subtitle_codecs, subtitle_languages,
                    movie_type, probed_at,
-                   parsed_title, parsed_year
+                   parsed_title, parsed_year,
+                   tmdb_id
             FROM movies
             ORDER BY filename COLLATE NOCASE;
             """
@@ -313,6 +347,131 @@ final class MovieStore {
         try exec("UPDATE movies SET probed_at = NULL;")
     }
 
+    // MARK: - TMDB matches
+
+    /// Sets `movies.tmdb_id` for one file. Doesn't touch the `tmdb_movies`
+    /// row — caller is expected to persist the detail separately via
+    /// `upsertTMDBDetail` (so multiple file copies of the same movie share
+    /// one row in `tmdb_movies`).
+    func setTMDBMatch(forPath path: String, tmdbID: Int?) throws {
+        let sql = "UPDATE movies SET tmdb_id = ? WHERE path = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        if let tmdbID {
+            sqlite3_bind_int64(stmt, 1, Int64(tmdbID))
+        } else {
+            sqlite3_bind_null(stmt, 1)
+        }
+        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// Inserts (or replaces) the full TMDB detail for `tmdb_id`. Complex
+    /// nested objects are JSON-encoded so we don't drift from TMDB's shape.
+    func upsertTMDBDetail(_ detail: TMDBMovieDetail) throws {
+        let sql = """
+            INSERT OR REPLACE INTO tmdb_movies (
+                tmdb_id, imdb_id, title, original_title, original_language,
+                tagline, overview, release_date, runtime, status,
+                budget, revenue, popularity, vote_average, vote_count,
+                adult, video, backdrop_path, poster_path, homepage,
+                genres_json, production_companies_json, production_countries_json,
+                spoken_languages_json, belongs_to_collection_json,
+                matched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int64(stmt, 1, Int64(detail.id))
+        bindNullableText(stmt, 2, detail.imdbID)
+        sqlite3_bind_text(stmt, 3, detail.title, -1, SQLITE_TRANSIENT)
+        bindNullableText(stmt, 4, detail.originalTitle)
+        bindNullableText(stmt, 5, detail.originalLanguage)
+        bindNullableText(stmt, 6, detail.tagline)
+        bindNullableText(stmt, 7, detail.overview)
+        bindNullableText(stmt, 8, detail.releaseDate)
+        bindNullableInt(stmt, 9, detail.runtime.map(Int64.init))
+        bindNullableText(stmt, 10, detail.status)
+        bindNullableInt(stmt, 11, detail.budget.map(Int64.init))
+        bindNullableInt(stmt, 12, detail.revenue.map(Int64.init))
+        bindNullableDouble(stmt, 13, detail.popularity)
+        bindNullableDouble(stmt, 14, detail.voteAverage)
+        bindNullableInt(stmt, 15, detail.voteCount.map(Int64.init))
+        bindNullableBool(stmt, 16, detail.adult)
+        bindNullableBool(stmt, 17, detail.video)
+        bindNullableText(stmt, 18, detail.backdropPath)
+        bindNullableText(stmt, 19, detail.posterPath)
+        bindNullableText(stmt, 20, detail.homepage)
+        bindJSON(stmt, 21, detail.genres)
+        bindJSON(stmt, 22, detail.productionCompanies)
+        bindJSON(stmt, 23, detail.productionCountries)
+        bindJSON(stmt, 24, detail.spokenLanguages)
+        bindJSON(stmt, 25, detail.belongsToCollection)
+        sqlite3_bind_double(stmt, 26, Date().timeIntervalSince1970)
+
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// Reads a previously-cached TMDB detail back from disk, or nil if we've
+    /// never matched this id.
+    func tmdbDetail(forID id: Int) throws -> TMDBMovieDetail? {
+        let sql = """
+            SELECT tmdb_id, imdb_id, title, original_title, original_language,
+                   tagline, overview, release_date, runtime, status,
+                   budget, revenue, popularity, vote_average, vote_count,
+                   adult, video, backdrop_path, poster_path, homepage,
+                   genres_json, production_companies_json, production_countries_json,
+                   spoken_languages_json, belongs_to_collection_json
+            FROM tmdb_movies WHERE tmdb_id = ?;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(id))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+
+        return TMDBMovieDetail(
+            id: Int(sqlite3_column_int64(stmt, 0)),
+            imdbID: readNullableText(stmt, 1),
+            title: readNullableText(stmt, 2) ?? "",
+            originalTitle: readNullableText(stmt, 3),
+            originalLanguage: readNullableText(stmt, 4),
+            tagline: readNullableText(stmt, 5),
+            overview: readNullableText(stmt, 6),
+            releaseDate: readNullableText(stmt, 7),
+            runtime: readNullableInt(stmt, 8),
+            status: readNullableText(stmt, 9),
+            budget: readNullableInt(stmt, 10),
+            revenue: readNullableInt(stmt, 11),
+            popularity: readNullableDouble(stmt, 12),
+            voteAverage: readNullableDouble(stmt, 13),
+            voteCount: readNullableInt(stmt, 14),
+            adult: readNullableBool(stmt, 15),
+            video: readNullableBool(stmt, 16),
+            backdropPath: readNullableText(stmt, 17),
+            posterPath: readNullableText(stmt, 18),
+            homepage: readNullableText(stmt, 19),
+            genres: decodeJSON(readNullableText(stmt, 20)),
+            productionCompanies: decodeJSON(readNullableText(stmt, 21)),
+            productionCountries: decodeJSON(readNullableText(stmt, 22)),
+            spokenLanguages: decodeJSON(readNullableText(stmt, 23)),
+            belongsToCollection: decodeJSON(readNullableText(stmt, 24))
+        )
+    }
+
     // MARK: - Row hydration
 
     private func makeMovie(from stmt: OpaquePointer?) -> MovieFile {
@@ -349,6 +508,7 @@ final class MovieStore {
         movie.probedAt = readNullableDouble(stmt, 23).map { Date(timeIntervalSince1970: $0) }
         movie.parsedTitle = readNullableText(stmt, 24) ?? ""
         movie.parsedYear = readNullableInt(stmt, 25)
+        movie.tmdbId = readNullableInt(stmt, 26)
         return movie
     }
 
@@ -398,6 +558,38 @@ final class MovieStore {
     private func splitCSV(_ value: String?) -> [String] {
         guard let value, !value.isEmpty else { return [] }
         return value.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    private func bindNullableBool(_ stmt: OpaquePointer?, _ idx: Int32, _ value: Bool?) {
+        if let value {
+            sqlite3_bind_int(stmt, idx, value ? 1 : 0)
+        } else {
+            sqlite3_bind_null(stmt, idx)
+        }
+    }
+
+    private func readNullableBool(_ stmt: OpaquePointer?, _ idx: Int32) -> Bool? {
+        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else { return nil }
+        return sqlite3_column_int(stmt, idx) != 0
+    }
+
+    /// Encodes any `Encodable` value to a JSON string column. Stores SQL NULL
+    /// for nil so we don't write empty payloads.
+    private func bindJSON<T: Encodable>(_ stmt: OpaquePointer?, _ idx: Int32, _ value: T?) {
+        guard let value,
+              let data = try? JSONEncoder().encode(value),
+              let string = String(data: data, encoding: .utf8) else {
+            sqlite3_bind_null(stmt, idx)
+            return
+        }
+        sqlite3_bind_text(stmt, idx, string, -1, SQLITE_TRANSIENT)
+    }
+
+    /// Counterpart to `bindJSON`. Returns nil on missing/bad JSON.
+    private func decodeJSON<T: Decodable>(_ text: String?) -> T? {
+        guard let text, !text.isEmpty,
+              let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 
     // MARK: - Misc helpers

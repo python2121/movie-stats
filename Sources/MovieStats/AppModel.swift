@@ -38,7 +38,18 @@ final class AppModel {
         didSet { UserDefaults.standard.set(directoryPath, forKey: Self.directoryKey) }
     }
 
-    private let store: MovieStore?
+    /// Exposed for the TMDB matcher window so it can read/write the
+    /// tmdb_movies table and per-file matches directly.
+    let store: MovieStore?
+
+    /// Pulls a fresh `[MovieFile]` snapshot from the database. Used after the
+    /// matcher writes TMDB ids so the checkmark column refreshes.
+    func reloadFromStore() {
+        guard let store else { return }
+        if let updated = try? store.allMovies() {
+            movies = updated
+        }
+    }
     private static let directoryKey = "selectedDirectoryPath"
 
     init() {

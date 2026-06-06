@@ -1,8 +1,10 @@
 import Foundation
 
-/// One movie row returned by TMDB's `search/movie` endpoint. Only fields we
-/// actually display are decoded — easy to grow later.
-struct TMDBMovie: Decodable, Sendable, Hashable {
+// MARK: - Search result row
+
+/// One movie row returned by TMDB's `search/movie` endpoint. Slim — enough to
+/// show in the matcher table and the manual-pick sheet.
+struct TMDBMovie: Decodable, Sendable, Hashable, Identifiable {
     let id: Int
     let title: String
     let originalTitle: String?
@@ -20,19 +22,149 @@ struct TMDBMovie: Decodable, Sendable, Hashable {
         case voteCount = "vote_count"
         case posterPath = "poster_path"
     }
+
+    var year: String? {
+        guard let date = releaseDate, date.count >= 4 else { return nil }
+        return String(date.prefix(4))
+    }
+
+    var displayTitle: String {
+        if let year { return "\(title) (\(year))" }
+        return title
+    }
 }
 
-/// Tiny URLSession-based wrapper around TMDB's v3 search endpoint. Supports
-/// either auth style transparently — a long bearer-style v4 token goes in the
+// MARK: - Full detail rows (everything we persist)
+
+struct TMDBGenre: Codable, Sendable, Hashable {
+    let id: Int
+    let name: String
+}
+
+struct TMDBCompany: Codable, Sendable, Hashable {
+    let id: Int
+    let name: String
+    let logoPath: String?
+    let originCountry: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case logoPath = "logo_path"
+        case originCountry = "origin_country"
+    }
+}
+
+struct TMDBCountry: Codable, Sendable, Hashable {
+    let iso31661: String
+    let name: String
+
+    enum CodingKeys: String, CodingKey {
+        case iso31661 = "iso_3166_1"
+        case name
+    }
+}
+
+struct TMDBLanguage: Codable, Sendable, Hashable {
+    let iso6391: String
+    let name: String
+    let englishName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case iso6391 = "iso_639_1"
+        case name
+        case englishName = "english_name"
+    }
+}
+
+struct TMDBCollection: Codable, Sendable, Hashable {
+    let id: Int
+    let name: String
+    let posterPath: String?
+    let backdropPath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case posterPath = "poster_path"
+        case backdropPath = "backdrop_path"
+    }
+}
+
+/// Full /movie/{id} response. Everything optional except `id` and `title`
+/// because TMDB is loose about which fields it returns for sparser titles.
+struct TMDBMovieDetail: Codable, Sendable, Hashable {
+    let id: Int
+    let imdbID: String?
+    let title: String
+    let originalTitle: String?
+    let originalLanguage: String?
+    let tagline: String?
+    let overview: String?
+    let releaseDate: String?
+    let runtime: Int?
+    let status: String?
+    let budget: Int?
+    let revenue: Int?
+    let popularity: Double?
+    let voteAverage: Double?
+    let voteCount: Int?
+    let adult: Bool?
+    let video: Bool?
+    let backdropPath: String?
+    let posterPath: String?
+    let homepage: String?
+    let genres: [TMDBGenre]?
+    let productionCompanies: [TMDBCompany]?
+    let productionCountries: [TMDBCountry]?
+    let spokenLanguages: [TMDBLanguage]?
+    let belongsToCollection: TMDBCollection?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, tagline, overview, runtime, status, budget, revenue
+        case popularity, adult, video, homepage, genres
+        case imdbID = "imdb_id"
+        case originalTitle = "original_title"
+        case originalLanguage = "original_language"
+        case releaseDate = "release_date"
+        case voteAverage = "vote_average"
+        case voteCount = "vote_count"
+        case backdropPath = "backdrop_path"
+        case posterPath = "poster_path"
+        case productionCompanies = "production_companies"
+        case productionCountries = "production_countries"
+        case spokenLanguages = "spoken_languages"
+        case belongsToCollection = "belongs_to_collection"
+    }
+
+    var year: String? {
+        guard let date = releaseDate, date.count >= 4 else { return nil }
+        return String(date.prefix(4))
+    }
+
+    var displayTitle: String {
+        if let year { return "\(title) (\(year))" }
+        return title
+    }
+}
+
+// MARK: - Service
+
+/// Tiny URLSession-based wrapper around TMDB's v3 API. Supports either auth
+/// style transparently — a long bearer-style v4 token goes in the
 /// Authorization header, a 32-char v3 API key goes in the query string.
 enum TMDBService {
     static let apiKeyDefaultsKey = "tmdbAPIKey"
+    /// Base URL for poster/backdrop thumbnails. Most TMDB clients use w500
+    /// for poster cards — good quality without huge bytes.
+    static let imageBaseURL = "https://image.tmdb.org/t/p/w500"
+    /// Higher-resolution version for the detail view.
+    static let imageOriginalURL = "https://image.tmdb.org/t/p/original"
 
     enum TMDBError: Error, LocalizedError {
         case missingAPIKey
         case http(Int, String)
         case decode
         case noResults
+        case cancelled
 
         var errorDescription: String? {
             switch self {
@@ -44,6 +176,8 @@ enum TMDBService {
                 return "Couldn't decode TMDB response."
             case .noResults:
                 return "No matches found."
+            case .cancelled:
+                return "Cancelled."
             }
         }
     }
@@ -63,9 +197,17 @@ enum TMDBService {
         }
     }
 
-    /// Searches TMDB for the best match for `title` + optional `year`. Returns
-    /// the first result (TMDB sorts by relevance/popularity by default).
+    /// Returns the first search hit for `title` + `year`. Convenience wrapper
+    /// around `searchMovies` for callers that just want the best guess.
     static func searchMovie(title: String, year: Int?) async throws -> TMDBMovie {
+        let results = try await searchMovies(title: title, year: year)
+        guard let first = results.first else { throw TMDBError.noResults }
+        return first
+    }
+
+    /// Full list of search results, ordered as TMDB returns them (relevance /
+    /// popularity). Used by the matcher's "pick a different result" sheet.
+    static func searchMovies(title: String, year: Int?) async throws -> [TMDBMovie] {
         guard let key = apiKey else { throw TMDBError.missingAPIKey }
 
         var components = URLComponents(string: "https://api.themoviedb.org/3/search/movie")!
@@ -78,31 +220,76 @@ enum TMDBService {
             items.append(URLQueryItem(name: "primary_release_year", value: String(year)))
         }
 
-        var request: URLRequest
-        if isBearerToken(key) {
-            components.queryItems = items
-            request = URLRequest(url: components.url!)
-            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        } else {
-            items.append(URLQueryItem(name: "api_key", value: key))
-            components.queryItems = items
-            request = URLRequest(url: components.url!)
-        }
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let request = makeRequest(components: &components, items: items, key: key)
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw TMDBError.decode }
-        guard (200..<300).contains(http.statusCode) else {
-            let bodyString = String(data: data.prefix(400), encoding: .utf8) ?? ""
-            throw TMDBError.http(http.statusCode, bodyString)
-        }
+        try check(response: response, data: data)
 
         struct SearchResponse: Decodable { let results: [TMDBMovie] }
         guard let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data) else {
             throw TMDBError.decode
         }
-        guard let first = decoded.results.first else { throw TMDBError.noResults }
-        return first
+        return decoded.results
+    }
+
+    /// Fetches the full `/movie/{id}` payload — needed before persisting a
+    /// match so we capture genres / production info / collection / etc.
+    static func details(forID id: Int) async throws -> TMDBMovieDetail {
+        guard let key = apiKey else { throw TMDBError.missingAPIKey }
+
+        var components = URLComponents(string: "https://api.themoviedb.org/3/movie/\(id)")!
+        let items: [URLQueryItem] = [
+            URLQueryItem(name: "language", value: "en-US"),
+        ]
+        let request = makeRequest(components: &components, items: items, key: key)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response: response, data: data)
+
+        guard let decoded = try? JSONDecoder().decode(TMDBMovieDetail.self, from: data) else {
+            throw TMDBError.decode
+        }
+        return decoded
+    }
+
+    /// Downloads the bytes for a poster path (e.g. `/abc.jpg`) at the
+    /// caller-chosen size. `nil` if the path is empty.
+    static func downloadImage(path: String?, base: String = imageBaseURL) async throws -> Data? {
+        guard let path, !path.isEmpty else { return nil }
+        let url = URL(string: base + path)!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        try check(response: response, data: data)
+        return data
+    }
+
+    // MARK: - Request helpers
+
+    private static func makeRequest(
+        components: inout URLComponents,
+        items: [URLQueryItem],
+        key: String
+    ) -> URLRequest {
+        var allItems = items
+        var request: URLRequest
+        if isBearerToken(key) {
+            components.queryItems = allItems
+            request = URLRequest(url: components.url!)
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        } else {
+            allItems.append(URLQueryItem(name: "api_key", value: key))
+            components.queryItems = allItems
+            request = URLRequest(url: components.url!)
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+
+    private static func check(response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else { throw TMDBError.decode }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data.prefix(400), encoding: .utf8) ?? ""
+            throw TMDBError.http(http.statusCode, body)
+        }
     }
 
     /// V4 bearer tokens are JWTs (header.payload.signature) and run to ~200

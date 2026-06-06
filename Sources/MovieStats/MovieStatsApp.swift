@@ -53,6 +53,12 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+
+        Window("Match Library to TMDB", id: "tmdb-matcher") {
+            MatcherView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 
     /// Opens an NSAlert with an inline text field for the user's TMDB API

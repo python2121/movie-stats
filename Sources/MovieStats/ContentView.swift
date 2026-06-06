@@ -229,6 +229,7 @@ struct ContentView: View {
                                 Text(byteString(entry.movie.size))
                                     .font(.callout.monospacedDigit())
                                     .foregroundStyle(.secondary)
+                                tmdbCheckmark(for: entry.movie)
                             }
                             .help(entry.movie.path)
                             .contentShape(Rectangle())
@@ -300,6 +301,17 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("Filter movies")
+        }
+    }
+
+    /// A small green checkmark right of the size column when this file has
+    /// been matched to a TMDB record. Hidden otherwise (no width reserved).
+    @ViewBuilder
+    private func tmdbCheckmark(for movie: MovieFile) -> some View {
+        if movie.tmdbId != nil {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .help("Matched to TMDB")
         }
     }
 
@@ -517,6 +529,14 @@ struct ContentView: View {
             .help("Find folders that contain no files")
 
             Button {
+                openWindow(id: "tmdb-matcher")
+            } label: {
+                Label("Match TMDB", systemImage: "popcorn")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Match unmatched movies to TMDB and cache the metadata")
+
+            Button {
                 chatOpen.toggle()
             } label: {
                 Label("Query the AI God", systemImage: "sparkles")
@@ -557,11 +577,12 @@ private struct MovieDetailSheet: View {
     enum TMDBState {
         case idle
         case loading
-        case noKey
-        case loaded(TMDBMovie)
+        case unmatched
+        case loaded(TMDBMovieDetail)
         case failed(String)
     }
 
+    @Environment(AppModel.self) private var appModel
     @State private var tmdbState: TMDBState = .idle
 
     var body: some View {
@@ -732,83 +753,109 @@ private struct MovieDetailSheet: View {
             case .idle, .loading:
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("Searching TMDB…")
+                    Text("Loading…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            case .noKey:
-                Label("Set your TMDB API key via the app menu → TMDB API Key…",
-                      systemImage: "key")
+            case .unmatched:
+                Label("Not matched yet. Use the toolbar's “Match TMDB” to look it up.",
+                      systemImage: "popcorn")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
             case .failed(let message):
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
-            case .loaded(let match):
-                tmdbResult(match)
+            case .loaded(let detail):
+                tmdbResult(detail)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: movie.id) {
-            await fetchTMDB()
+            loadTMDB()
         }
     }
 
     @ViewBuilder
-    private func tmdbResult(_ match: TMDBMovie) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(match.title)
-                    .font(.body.weight(.semibold))
-                    .textSelection(.enabled)
-                if let year = match.releaseDate?.prefix(4), year.count == 4 {
-                    Text("(\(year))")
-                        .font(.body)
+    private func tmdbResult(_ detail: TMDBMovieDetail) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            if let poster = PosterCache.loadPoster(forTMDBID: detail.id) {
+                Image(nsImage: poster)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 100)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(detail.title)
+                        .font(.body.weight(.semibold))
+                        .textSelection(.enabled)
+                    if let year = detail.year {
+                        Text("(\(year))")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let tagline = detail.tagline, !tagline.isEmpty {
+                    Text(tagline)
+                        .font(.caption.italic())
                         .foregroundStyle(.secondary)
                 }
-            }
 
-            Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 4) {
-                if let release = match.releaseDate, !release.isEmpty {
-                    detailRow("Released", release)
+                Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 4) {
+                    if let release = detail.releaseDate, !release.isEmpty {
+                        detailRow("Released", release)
+                    }
+                    if let runtime = detail.runtime, runtime > 0 {
+                        detailRow("Runtime", "\(runtime) min")
+                    }
+                    if let avg = detail.voteAverage, let count = detail.voteCount, count > 0 {
+                        detailRow("Rating", String(format: "%.1f / 10  (%d votes)", avg, count))
+                    }
+                    if let genres = detail.genres, !genres.isEmpty {
+                        detailRow("Genres", genres.map(\.name).joined(separator: ", "))
+                    }
+                    if let original = detail.originalTitle, original != detail.title {
+                        detailRow("Original Title", original)
+                    }
+                    if let status = detail.status, !status.isEmpty {
+                        detailRow("Status", status)
+                    }
+                    if let imdb = detail.imdbID, !imdb.isEmpty {
+                        detailRow("IMDb", imdb)
+                    }
+                    detailRow("TMDB ID", String(detail.id))
                 }
-                if let avg = match.voteAverage, let count = match.voteCount, count > 0 {
-                    detailRow("Rating", String(format: "%.1f / 10  (%d votes)", avg, count))
-                }
-                if let original = match.originalTitle, original != match.title {
-                    detailRow("Original Title", original)
-                }
-                detailRow("TMDB ID", String(match.id))
-            }
 
-            if let overview = match.overview, !overview.isEmpty {
-                Text(overview)
-                    .font(.callout)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 4)
+                if let overview = detail.overview, !overview.isEmpty {
+                    Text(overview)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private func fetchTMDB() async {
-        guard TMDBService.apiKey != nil else {
-            tmdbState = .noKey
+    /// Reads the cached TMDB detail from the local DB (no live API call). The
+    /// matcher window is responsible for populating that DB.
+    private func loadTMDB() {
+        guard let tmdbID = movie.tmdbId else {
+            tmdbState = .unmatched
             return
         }
         tmdbState = .loading
-
-        let title: String
-        if !movie.parsedTitle.isEmpty {
-            title = movie.parsedTitle
-        } else {
-            title = (movie.filename as NSString).deletingPathExtension
-        }
-
         do {
-            let match = try await TMDBService.searchMovie(title: title, year: movie.parsedYear)
-            tmdbState = .loaded(match)
+            if let detail = try appModel.store?.tmdbDetail(forID: tmdbID) {
+                tmdbState = .loaded(detail)
+            } else {
+                tmdbState = .failed("TMDB cache empty for id \(tmdbID).")
+            }
         } catch {
             tmdbState = .failed(error.localizedDescription)
         }
