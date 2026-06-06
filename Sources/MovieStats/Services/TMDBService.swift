@@ -176,35 +176,29 @@ struct TMDBMovieDetail: Codable, Sendable, Hashable {
         case releaseDates = "release_dates"
     }
 
-    /// The most user-meaningful release date for this title — US theatrical
-    /// when available, otherwise any country's theatrical / limited release,
-    /// falling back to TMDB's top-level `release_date`. Solves the "TMDB is
-    /// behind by one year" issue for foreign films whose origin-country
-    /// premiere predates their US wide release.
+    /// The most user-meaningful release date for this title — the earliest
+    /// premiere / theatrical-limited / theatrical entry across all
+    /// countries, matching IMDb's "first known release year" convention
+    /// (films like Miracle Mile and Perfect Blue are catalogued by their
+    /// festival-premiere year, not the wide release). Falls back to TMDB's
+    /// top-level `release_date` when no per-country data is available.
+    ///
+    /// Skips Digital (4), Physical (5), and TV (6) — those don't move the
+    /// canonical "year of release" needle.
     var preferredReleaseDate: String? {
-        let groups = releaseDates?.results ?? []
-        let theatrical = 3   // wide theatrical
-        let limited = 2      // limited theatrical
-
-        if let us = groups.first(where: { $0.iso31661 == "US" }) {
-            if let d = us.releaseDates.first(where: { $0.type == theatrical })?.releaseDate, !d.isEmpty {
-                return d
-            }
-            if let d = us.releaseDates.first(where: { $0.type == limited })?.releaseDate, !d.isEmpty {
-                return d
-            }
-        }
-        for group in groups {
-            if let d = group.releaseDates.first(where: { $0.type == theatrical })?.releaseDate, !d.isEmpty {
-                return d
+        // Types: 1=Premiere, 2=Theatrical (limited), 3=Theatrical.
+        let theatricalTypes: Set<Int> = [1, 2, 3]
+        var earliest: String?
+        for group in releaseDates?.results ?? [] {
+            for entry in group.releaseDates {
+                guard let type = entry.type, theatricalTypes.contains(type),
+                      let date = entry.releaseDate, !date.isEmpty
+                else { continue }
+                // YYYY-MM-DD sorts lexicographically the same as chronologically.
+                if earliest == nil || date < earliest! { earliest = date }
             }
         }
-        for group in groups {
-            if let d = group.releaseDates.first(where: { $0.type == limited })?.releaseDate, !d.isEmpty {
-                return d
-            }
-        }
-        return releaseDate
+        return earliest ?? releaseDate
     }
 
     var year: String? {
