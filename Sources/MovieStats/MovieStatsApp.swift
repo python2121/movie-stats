@@ -23,6 +23,11 @@ struct MovieStatsApp: App {
                 .keyboardShortcut("E", modifiers: [.command, .shift])
                 .disabled(model.movies.isEmpty)
             }
+            CommandGroup(after: .appSettings) {
+                Button("TMDB API Key…") {
+                    promptForTMDBKey()
+                }
+            }
         }
 
         Window(CleanupCategory.images.title, id: CleanupCategory.images.id) {
@@ -48,6 +53,25 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+    }
+
+    /// Opens an NSAlert with an inline text field for the user's TMDB API
+    /// key (either a v3 key or a v4 read access token). Persists via
+    /// `TMDBService.setAPIKey`.
+    @MainActor
+    private func promptForTMDBKey() {
+        let alert = NSAlert()
+        alert.messageText = "TMDB API Key"
+        alert.informativeText = "Paste your TMDB API key (v3) or read-access token (v4). Get one at themoviedb.org → Settings → API."
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "API key"
+        field.stringValue = TMDBService.apiKey ?? ""
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            TMDBService.setAPIKey(field.stringValue)
+        }
     }
 
     /// Prompts for a destination then writes a CSV snapshot of the library.

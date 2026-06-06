@@ -15,11 +15,40 @@ struct ContentView: View {
     @State private var selectedTypes: Set<String> = []  // empty = all
     @State private var chatOpen = false
     /// Persisted between launches so the panel re-opens at the user's last
-    /// chosen width.
-    @AppStorage("aiPanelWidth") private var panelWidth: Double = 380
-    /// Floor/ceiling guard rails for the side panel's resizable width.
+    /// chosen width. Default = `panelMinWidth` so a fresh install opens at
+    /// the narrowest allowed size. Key suffix bumped to discard older saved
+    /// values from earlier defaults.
+    @AppStorage("aiPanelWidth_v2") private var panelWidth: Double = 280
+    /// Live window width, captured via a background GeometryReader. Drives
+    /// the dynamic max-panel-width calculation so the charts row never gets
+    /// squeezed past its readable minimum.
+    @State private var availableWidth: Double = 0
+    /// Floor on the panel width.
     private static let panelMinWidth: Double = 280
-    private static let panelMaxWidth: Double = 900
+    /// Hard ceiling on the panel width regardless of how big the window is.
+    private static let panelAbsoluteMaxWidth: Double = 900
+    /// Absolute smallest mainColumn we'll let the layout demand — used to
+    /// compute the window's own minimum when the chat panel is open. Charts
+    /// will be cramped at this size, but the app stays usable.
+    private static let mainColumnAbsoluteMinWidth: Double = 690
+    /// Threshold below which the two chart legends start bleeding past the
+    /// card edges. Used only as the drag-clamp for the panel — never as a
+    /// window minimum, so opening the panel doesn't force the window past
+    /// this point. Bump up if you see legend text wrap, down if there's slack.
+    private static let mainColumnMinWidth: Double = 1020
+
+    /// Handle width — needs to be in the maxPanelWidth math so the panel
+    /// can't push mainColumn past its minimum by exactly 6pt.
+    private static let handleWidth: Double = 6
+
+    /// The largest the side panel is allowed to be right now, given the
+    /// current window width. Falls back to the absolute max while we haven't
+    /// yet received a window-width measurement.
+    private var maxPanelWidth: Double {
+        guard availableWidth > 0 else { return Self.panelAbsoluteMaxWidth }
+        let dynamicMax = max(Self.panelMinWidth, availableWidth - Self.mainColumnMinWidth - Self.handleWidth)
+        return min(Self.panelAbsoluteMaxWidth, dynamicMax)
+    }
 
     enum SortMode: String, CaseIterable, Identifiable {
         case sizeDescending = "Largest First"
@@ -36,7 +65,7 @@ struct ContentView: View {
                     ResizeHandle(
                         currentWidth: panelWidth,
                         onResize: { proposed in
-                            panelWidth = max(Self.panelMinWidth, min(Self.panelMaxWidth, proposed))
+                            panelWidth = max(Self.panelMinWidth, min(maxPanelWidth, proposed))
                         },
                         onDragEnded: {}
                     )
@@ -46,7 +75,31 @@ struct ContentView: View {
                 .transition(.move(edge: .trailing))
             }
         }
+        .frame(
+            // Drives `.windowResizability(.contentMinSize)`. When the chat
+            // panel is open, lift the window-min just enough that the panel
+            // can fit alongside the *absolute* mainColumn floor — not the
+            // chart-comfort threshold. That way opening the panel from a
+            // moderately-narrow window doesn't snap the window much larger.
+            minWidth: chatOpen
+                ? Self.mainColumnAbsoluteMinWidth + Self.handleWidth + Self.panelMinWidth
+                : Self.mainColumnAbsoluteMinWidth,
+            minHeight: 380
+        )
         .animation(.easeInOut(duration: 0.22), value: chatOpen)
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: AvailableWidthKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(AvailableWidthKey.self) { newWidth in
+            availableWidth = newWidth
+            // If the user shrinks the window, pull the panel in so the charts
+            // stay readable.
+            let cap = maxPanelWidth
+            if panelWidth > cap { panelWidth = cap }
+        }
         .toolbar { toolbarContent }
         .sheet(isPresented: Binding(
             get: { model.isScanning || model.isProbing },
@@ -93,7 +146,6 @@ struct ContentView: View {
             movieList
         }
         .padding(28)
-        .frame(minWidth: 600, minHeight: 380)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -495,11 +547,22 @@ struct ContentView: View {
 
 /// In-window detail popup. Shows every metadata field we've collected for the
 /// selected movie in an aligned two-column grid, with audio + subtitle tracks
-/// broken out into their own tables below. Triggered by clicking a row in the
-/// main movie list; dismisses on click-outside, Escape, or Done.
+/// broken out into their own tables below, plus a live TMDB lookup at the
+/// bottom. Triggered by clicking a row in the main movie list; dismisses on
+/// click-outside, Escape, or Done.
 private struct MovieDetailSheet: View {
     let movie: MovieFile
     let onClose: () -> Void
+
+    enum TMDBState {
+        case idle
+        case loading
+        case noKey
+        case loaded(TMDBMovie)
+        case failed(String)
+    }
+
+    @State private var tmdbState: TMDBState = .idle
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -555,6 +618,9 @@ private struct MovieDetailSheet: View {
                         Divider()
                         subtitleTracksTable
                     }
+
+                    Divider()
+                    tmdbSection
                 }
                 .padding(.vertical, 14)
             }
@@ -651,6 +717,101 @@ private struct MovieDetailSheet: View {
         let channels = idx < movie.audioChannels.count ? movie.audioChannels[idx] : 0
         let label = Self.channelLabel(channels)
         return label.isEmpty ? "—" : label
+    }
+
+    // MARK: - TMDB
+
+    @ViewBuilder
+    private var tmdbSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("TMDB")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            switch tmdbState {
+            case .idle, .loading:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Searching TMDB…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case .noKey:
+                Label("Set your TMDB API key via the app menu → TMDB API Key…",
+                      systemImage: "key")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            case .loaded(let match):
+                tmdbResult(match)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: movie.id) {
+            await fetchTMDB()
+        }
+    }
+
+    @ViewBuilder
+    private func tmdbResult(_ match: TMDBMovie) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(match.title)
+                    .font(.body.weight(.semibold))
+                    .textSelection(.enabled)
+                if let year = match.releaseDate?.prefix(4), year.count == 4 {
+                    Text("(\(year))")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 4) {
+                if let release = match.releaseDate, !release.isEmpty {
+                    detailRow("Released", release)
+                }
+                if let avg = match.voteAverage, let count = match.voteCount, count > 0 {
+                    detailRow("Rating", String(format: "%.1f / 10  (%d votes)", avg, count))
+                }
+                if let original = match.originalTitle, original != match.title {
+                    detailRow("Original Title", original)
+                }
+                detailRow("TMDB ID", String(match.id))
+            }
+
+            if let overview = match.overview, !overview.isEmpty {
+                Text(overview)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
+        }
+    }
+
+    private func fetchTMDB() async {
+        guard TMDBService.apiKey != nil else {
+            tmdbState = .noKey
+            return
+        }
+        tmdbState = .loading
+
+        let title: String
+        if !movie.parsedTitle.isEmpty {
+            title = movie.parsedTitle
+        } else {
+            title = (movie.filename as NSString).deletingPathExtension
+        }
+
+        do {
+            let match = try await TMDBService.searchMovie(title: title, year: movie.parsedYear)
+            tmdbState = .loaded(match)
+        } catch {
+            tmdbState = .failed(error.localizedDescription)
+        }
     }
 
     @ViewBuilder
@@ -1037,5 +1198,14 @@ private struct CategoryPieCard: View {
         case .bytes:
             return ByteCountFormatter.string(fromByteCount: Int64(slice.value), countStyle: .file)
         }
+    }
+}
+
+/// PreferenceKey used to bubble the window/host width up to `ContentView` so
+/// the AI panel's max resize width can be clamped against it.
+private struct AvailableWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
