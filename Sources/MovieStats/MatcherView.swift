@@ -27,9 +27,14 @@ struct MatcherView: View {
         .frame(minWidth: 760, minHeight: 480)
         .onAppear {
             if matcher == nil {
-                let m = MatcherModel(appModel: appModel)
+                matcher = MatcherModel(appModel: appModel)
+            }
+            // Re-parse the file-title list from the AppModel every time the
+            // window appears so a fresh rescan picks up renames / new files
+            // / newly-matched files. Skip mid-operation so a re-appear can't
+            // nuke an active scan/confirm.
+            if let m = matcher, !m.isScanning, !m.isConfirming {
                 m.reload()
-                matcher = m
             }
         }
         .sheet(item: $editingRow) { row in

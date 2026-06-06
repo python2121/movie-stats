@@ -7,8 +7,12 @@ import Foundation
 private enum TitleSimilarity {
     /// Strips punctuation, collapses whitespace, lowercases. Leaves the bytes
     /// the actual title carries — no aggressive stemming or stop-word removal.
+    /// `&` is folded to `and` before stripping so "Mr. & Mrs. Smith" and
+    /// "Mr. and Mrs. Smith" normalize identically.
     static func normalize(_ s: String) -> String {
-        let lower = s.lowercased()
+        let lower = s
+            .replacingOccurrences(of: "&", with: " and ")
+            .lowercased()
         var scalars = String.UnicodeScalarView()
         var prevWasSpace = false
         for scalar in lower.unicodeScalars {
@@ -21,11 +25,9 @@ private enum TitleSimilarity {
                     prevWasSpace = true
                 }
             }
-            // Other punctuation (periods, ampersands, commas, …) is dropped.
+            // Other punctuation (periods, commas, colons, …) is dropped.
         }
-        var out = String(scalars)
-        if out.hasSuffix(" ") { out.removeLast() }
-        return out
+        return String(scalars).trimmingCharacters(in: .whitespaces)
     }
 
     /// Normalized similarity. 1.0 = identical after normalization.
