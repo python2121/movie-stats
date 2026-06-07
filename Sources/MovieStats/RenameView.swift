@@ -18,8 +18,12 @@ struct RenameView: View {
     var body: some View {
         Group {
             if let renamer {
-                content(model: renamer)
-                    .environment(renamer)
+                if renamer.isLoading {
+                    loadingView(model: renamer)
+                } else {
+                    content(model: renamer)
+                        .environment(renamer)
+                }
             } else {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -30,11 +34,43 @@ struct RenameView: View {
             if renamer == nil {
                 renamer = RenameModel(appModel: appModel)
             }
-            if let r = renamer, !r.isApplying {
-                r.reload()
-            }
+            guard let r = renamer, !r.isApplying, !r.isLoading else { return }
+            // Dispatch reload as a Task so the per-row directory
+            // enumeration can yield to the main actor and the loading
+            // spinner can paint in the meantime.
+            Task { await r.reload() }
         }
         .onExitCommand { dismiss() }
+    }
+
+    /// Centered spinner + progress shown while `reload()` is building the
+    /// plan. Visible from the moment the toolbar button is clicked until
+    /// the table is populated.
+    @ViewBuilder
+    private func loadingView(model: RenameModel) -> some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Building rename plan…")
+                .font(.headline)
+            if model.loadTotal > 0 {
+                VStack(spacing: 4) {
+                    ProgressView(value: model.progress)
+                        .progressViewStyle(.linear)
+                        .frame(width: 280)
+                    Text("\(model.loadProcessed) of \(model.loadTotal)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("Scanning folders for subtitle files — this can take a moment on a network volume.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     @ViewBuilder
@@ -172,42 +208,10 @@ struct RenameView: View {
     @ViewBuilder
     private func rowView(row: RenameModel.Row, isCurrent: Bool, model: RenameModel) -> some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(row.currentDisplay)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                        .help(row.currentDisplay)
-                    if row.hasSpecialCharacters {
-                        StatusChip(text: "special chars", color: .orange)
-                    }
-                    if row.isRemux {
-                        StatusChip(text: "Remux", color: .purple)
-                    }
-                    if row.plan == .createFolderAndMove {
-                        StatusChip(text: "loose", color: .blue)
-                    }
-                    if !row.subtitles.isEmpty {
-                        StatusChip(
-                            text: subtitleChipText(row: row),
-                            color: subtitleChipColor(row: row)
-                        )
-                        .help(subtitleTooltip(row: row))
-                    }
-                }
-                statusLine(row: row)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
+            currentCell(for: row)
             Divider()
-
             proposedCell(for: row)
-
             Divider()
-
             Toggle("", isOn: Binding(
                 get: { row.included },
                 set: { newValue in model.setIncluded(newValue, for: row.id) }
@@ -221,10 +225,48 @@ struct RenameView: View {
         .background(rowBackground(row: row, isCurrent: isCurrent))
     }
 
-    /// Two-line proposed-path cell: folder on top, filename indented
-    /// beneath. Cleaner read than the old single-line truncated path —
-    /// you can see the new folder name and the new file name at a glance
-    /// without scanning the whole string.
+    /// Left-hand cell: current video path + every subtitle file indented
+    /// beneath it, plus the special-chars / Remux / loose chips on the
+    /// video line. Mirrors the structure of `proposedCell` so the user
+    /// can scan both sides line-by-line.
+    @ViewBuilder
+    private func currentCell(for row: RenameModel.Row) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(row.currentDisplay)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(row.currentDisplay)
+                if row.hasSpecialCharacters {
+                    StatusChip(text: "special chars", color: .orange)
+                }
+                if row.isRemux {
+                    StatusChip(text: "Remux", color: .purple)
+                }
+                if row.plan == .createFolderAndMove {
+                    StatusChip(text: "loose", color: .blue)
+                }
+            }
+            ForEach(row.subtitles) { sub in
+                Text(subtitleDisplayName(path: sub.path))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .padding(.leading, 16)
+            }
+            statusLine(row: row)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    /// Right-hand cell: proposed folder + video file + every subtitle's
+    /// proposed location, all in canonical form. Mirrors the structure of
+    /// the current cell so the user can scan both sides line-by-line.
     @ViewBuilder
     private func proposedCell(for row: RenameModel.Row) -> some View {
         let (folder, filename) = splitProposedPath(row.proposedDisplay)
@@ -239,11 +281,50 @@ struct RenameView: View {
                 .truncationMode(.middle)
                 .textSelection(.enabled)
                 .padding(.leading, 12)
+            ForEach(row.subtitles) { sub in
+                HStack(spacing: 4) {
+                    Text("/" + subtitleDisplayName(path: sub.newPath))
+                        .font(.caption.monospaced())
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    proposedSubtitleAnnotation(sub)
+                }
+                .padding(.leading, 12)
+            }
         }
         .help(row.proposedDisplay)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Inline annotation rendered next to a proposed subtitle path —
+    /// surfaces the `.N` collision suffix, soft warnings, and per-sub
+    /// failure state. Visual cue only; the full text lives in the
+    /// existing subtitle tooltip.
+    @ViewBuilder
+    private func proposedSubtitleAnnotation(_ sub: RenameModel.SubtitleAsset) -> some View {
+        if sub.collisionSuffix {
+            Text("·  collision-suffix")
+                .font(.caption2)
+                .foregroundStyle(.yellow)
+        }
+        if sub.warningReason != nil {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.yellow)
+        }
+        if sub.status == .failed {
+            Image(systemName: "xmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.red)
+        }
+        if sub.status == .succeeded {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        }
     }
 
     /// Splits `<folder-portion>/<filename>` into its two halves. The

@@ -39,48 +39,93 @@ enum SubtitleClassifier {
         subtitleFolderAliases.contains(folderName.lowercased())
     }
 
-    /// Pulls the language code + qualifier flags out of a filename like
-    /// `Movie.2020.eng.forced.srt`. Splits on common separators (including
-    /// parens / brackets so `English (CC)` and `English [SDH]` tokenize
-    /// cleanly into `english` + `cc` / `sdh`), matches each token against
-    /// the language / qualifier tables. Returns the first language match
-    /// it finds.
-    static func parse(filename: String) -> (lang: String?, forced: Bool, sdh: Bool) {
+    /// Pulls the language code, qualifier flags, and optional descriptor out
+    /// of a filename like `Movie.commentary.eng.srt` or `Subs/Latin American.spa.srt`.
+    /// Splits on common separators (including parens / brackets), then matches
+    /// each token against the language / qualifier / descriptor tables.
+    ///
+    /// The descriptor is what distinguishes multiple same-language tracks —
+    /// commentary, simplified vs traditional Chinese, regional Spanish, etc.
+    /// Plex / Jellyfin display it as the track label, so two English tracks
+    /// can coexist as `<base>.en.srt` and `<base>.en.commentary.srt`.
+    static func parse(filename: String) -> (lang: String?, forced: Bool, sdh: Bool, descriptor: String?) {
         let stem = (filename as NSString).deletingPathExtension
-        // Separators include parens and square brackets so subtitle
-        // filenames like `English (CC).eng.srt` and `English [SDH].eng.srt`
-        // produce tokens like `english`, `cc`, `sdh` — which the qualifier
-        // tables already recognize.
         let tokens = stem.split(whereSeparator: { ".-_ ()[]".contains($0) }).map { $0.lowercased() }
         var lang: String?
         var forced = false
         var sdh = false
+        var descriptor: String?
+        // Multi-token SDH detection: catches `Hearing Impaired` /
+        // `Hearing_Impaired` / `Hearing-Impaired` / `Hearing.Impaired` that
+        // get split into two adjacent tokens by our separator-based
+        // tokenizer. The single-token `hearingimpaired` is already in
+        // `sdhTags` below.
+        for i in tokens.indices.dropLast()
+        where tokens[i] == "hearing" && tokens[i + 1] == "impaired" {
+            sdh = true
+            break
+        }
         for token in tokens {
             if forcedTags.contains(token) { forced = true; continue }
             if sdhTags.contains(token) { sdh = true; continue }
+            if descriptor == nil, let desc = descriptorMap[token] { descriptor = desc; continue }
             if lang == nil, let normalized = languageMap[token] { lang = normalized }
         }
-        return (lang, forced, sdh)
+        return (lang, forced, sdh, descriptor)
     }
 
-    /// Composes a canonical subtitle filename: `{base}.{lang}[.sdh][.forced].ext`.
-    /// Drops segments that aren't set so the file remains a valid Plex / Jellyfin
-    /// sidecar even with no tags.
+    /// Composes a canonical subtitle filename:
+    /// `{base}.{lang}.{descriptor}[.sdh][.forced].ext`. Drops segments that
+    /// aren't set so the file remains a valid Plex / Jellyfin sidecar even
+    /// with no tags. The descriptor ordering — language → descriptor →
+    /// flags — keeps multi-token track labels reading naturally
+    /// ("English commentary forced").
     static func compose(
         base: String,
         lang: String?,
         forced: Bool,
         sdh: Bool,
+        descriptor: String?,
         ext: String
     ) -> String {
         var name = base
         if let lang { name += ".\(lang)" }
+        if let descriptor { name += ".\(descriptor)" }
         if sdh { name += ".sdh" }
         if forced { name += ".forced" }
         return ext.isEmpty ? name : "\(name).\(ext)"
     }
 
     // MARK: - Lookup tables
+
+    /// Descriptors that distinguish multiple same-language tracks. Plex /
+    /// Jellyfin display these as the subtitle label. First-match-wins per
+    /// filename — so `Director.Commentary.eng.srt` lands on `director`
+    /// (first token), but `Commentary.eng.srt` lands on `commentary`.
+    /// Region tokens are kept separate from language aliases so that e.g.
+    /// `Brazilian.por.srt` becomes `.pt.brazilian.srt` instead of
+    /// colliding with a plain `por.srt`.
+    private static let descriptorMap: [String: String] = {
+        var m: [String: String] = [:]
+        let entries: [(canonical: String, aliases: [String])] = [
+            ("commentary", ["commentary", "comm", "comment", "commentaries"]),
+            ("director", ["director", "directors"]),
+            ("cast", ["cast"]),
+            ("crew", ["crew"]),
+            ("behindthescenes", ["bts", "behindthescenes"]),
+            ("simplified", ["simplified", "simp"]),
+            ("traditional", ["traditional", "trad"]),
+            ("brazilian", ["brazilian"]),
+            ("latin", ["latin", "latinamerican"]),
+            ("european", ["european"]),
+            ("canadian", ["canadian"]),
+            ("british", ["british"]),
+        ]
+        for entry in entries {
+            for alias in entry.aliases { m[alias] = entry.canonical }
+        }
+        return m
+    }()
 
     private static let forcedTags: Set<String> = ["forced", "force"]
     /// "hi" is *not* listed here intentionally — it's also the ISO 639-1 code
@@ -135,6 +180,28 @@ enum SubtitleClassifier {
             ("sl", ["sl", "slv", "slovene", "slovenian"]),
             ("et", ["et", "est", "estonian"]),
             ("hr", ["hr", "hrv", "croatian"]),
+            // Coverage for additional languages that crop up in scene
+            // releases — Iberian regionals, Balkan languages, South Asian
+            // languages, Nordic outliers, etc.
+            ("ca", ["ca", "cat", "catalan"]),
+            ("gl", ["gl", "glg", "galician"]),
+            ("eu", ["eu", "eus", "baq", "basque"]),
+            ("cy", ["cy", "wel", "cym", "welsh"]),
+            ("ga", ["ga", "gle", "irish"]),
+            ("is", ["is", "ice", "isl", "icelandic"]),
+            ("af", ["af", "afr", "afrikaans"]),
+            ("sw", ["sw", "swa", "swahili"]),
+            ("sq", ["sq", "alb", "sqi", "albanian"]),
+            ("sr", ["sr", "srp", "scc", "serbian"]),
+            ("bs", ["bs", "bos", "bosnian"]),
+            ("mk", ["mk", "mac", "mkd", "macedonian"]),
+            ("tl", ["tl", "tgl", "fil", "tagalog", "filipino"]),
+            ("bn", ["bn", "ben", "bengali"]),
+            ("ta", ["ta", "tam", "tamil"]),
+            ("te", ["te", "tel", "telugu"]),
+            ("mr", ["mr", "mar", "marathi"]),
+            ("pa", ["pa", "pan", "punjabi"]),
+            ("ur", ["ur", "urd", "urdu"]),
         ]
         for entry in entries {
             for alias in entry.aliases { m[alias] = entry.canonical }

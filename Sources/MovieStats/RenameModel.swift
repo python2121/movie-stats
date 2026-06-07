@@ -74,6 +74,16 @@ final class RenameModel {
         let language: String?
         let isForced: Bool
         let isSDH: Bool
+        /// Optional descriptor distinguishing multiple same-language
+        /// tracks (`commentary`, `simplified`, `brazilian`, …). nil for
+        /// the primary track.
+        let descriptor: String?
+        /// True iff this asset's filename ended up with a numeric `.N`
+        /// suffix because the originally-composed name was already taken
+        /// by another asset on the same row. Surfaced in the UI so the
+        /// user can manually rename to something meaningful (e.g.
+        /// `.en.2.srt` → `.en.commentary.srt`).
+        let collisionSuffix: Bool
         var status: Status = .pending
         var failureReason: String?
         /// Soft warning surfaced in the preview — set at plan-build for
@@ -93,8 +103,18 @@ final class RenameModel {
 
     private(set) var rows: [Row] = []
     private(set) var isApplying = false
-    /// 0...1 progress across the included rows during Apply.
+    /// True while `reload()` is still building the plan — surfaces a
+    /// progress indicator in the UI for slow network volumes where the
+    /// per-row directory enumeration takes a moment.
+    private(set) var isLoading = false
+    /// 0...1 progress for the active build (during `reload`) or apply
+    /// (during `apply`). Single field — never both running at once.
     private(set) var progress: Double = 0
+    /// Number of movies inspected so far during `reload`. Drives the
+    /// "Building plan: M / N" line.
+    private(set) var loadProcessed: Int = 0
+    /// Total movies we'll inspect during this `reload` pass.
+    private(set) var loadTotal: Int = 0
     /// Index of the row currently being applied — drives highlight + the
     /// "currently renaming" line.
     private(set) var currentIndex: Int?
@@ -122,11 +142,22 @@ final class RenameModel {
 
     /// Rebuilds `rows` from the current AppModel + TMDB cache. Called on
     /// every window appear so a fresh rescan or new TMDB matches are
-    /// reflected.
-    func reload() {
+    /// reflected. Async so the per-row directory enumeration (slow on
+    /// network volumes) can yield to the main actor and keep the UI
+    /// responsive — driving the loading spinner + progress bar.
+    func reload() async {
+        guard !isLoading else { return }
         guard let store = appModel.store else {
             rows = []
             return
+        }
+        isLoading = true
+        progress = 0
+        loadProcessed = 0
+        loadTotal = appModel.movies.count
+        defer {
+            isLoading = false
+            progress = 0
         }
         let scanRoot = appModel.directoryPath
 
@@ -148,7 +179,16 @@ final class RenameModel {
         // by filename-stem prefix without rescanning the root per row.
         let rootSubtitleIndex = Self.scanForSubtitles(directory: scanRoot, includeSubfolders: false)
 
-        for movie in appModel.movies {
+        for (movieIdx, movie) in appModel.movies.enumerated() {
+            // Yield every 5 movies so the UI gets a chance to repaint the
+            // progress indicator. The per-movie work below is mostly file
+            // system I/O on a network volume, which can be slow enough
+            // for the user to want feedback.
+            if movieIdx % 5 == 0 {
+                loadProcessed = movieIdx
+                progress = loadTotal > 0 ? Double(movieIdx) / Double(loadTotal) : 0
+                await Task.yield()
+            }
             guard let tmdbID = movie.tmdbId else { continue }
             let detail: TMDBMovieDetail
             if let cached = detailCache[tmdbID] {
@@ -266,6 +306,7 @@ final class RenameModel {
         }
 
         rows = newRows
+        loadProcessed = loadTotal
         progress = 0
         currentIndex = nil
         currentPath = nil
@@ -514,10 +555,13 @@ final class RenameModel {
     ///     sibling SRTs alongside the video get consolidated into `Subs/`
     ///     too. (Otherwise siblings stay as siblings — both layouts are
     ///     valid; we only flip when both exist.)
-    ///  2. Walk every subtitle file and emit a `SubtitleAsset` for it,
-    ///     skipping siblings whose target path would collide with a
-    ///     subfolder entry of the same language (those stay in place; the
-    ///     conflict is surfaced via a failure-reason on the row).
+    ///  2. Walk every subtitle file and emit a `SubtitleAsset` for it.
+    ///     When two assets compose to the same target name, the
+    ///     `UniqueTargetAllocator` suffixes the second one with `.2`,
+    ///     `.3`, etc. instead of failing — so legitimate duplicate-
+    ///     language tracks (commentary, alternate rips) all land on
+    ///     disk and the user can rename them with a meaningful descriptor
+    ///     in Finder if desired.
     private static func subtitlesForFolderedVideo(
         videoFolder: String,
         newFolder: String,
@@ -526,11 +570,13 @@ final class RenameModel {
         var assets: [SubtitleAsset] = []
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: videoFolder) else { return [] }
+        // Sorted iteration so collision-suffix numbering is deterministic
+        // across reload passes — first alphabetical wins the plain name.
+        let sortedEntries = entries.sorted()
 
-        // First pass: locate any Subs-style subfolder. Only one is honored;
-        // multiples (rare) get the first by directory-iteration order.
+        // First pass: locate any Subs-style subfolder.
         var subsContainer: String?
-        for entry in entries {
+        for entry in sortedEntries {
             let entryPath = (videoFolder as NSString).appendingPathComponent(entry)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: entryPath, isDirectory: &isDir),
@@ -545,89 +591,50 @@ final class RenameModel {
         let canonicalSubsFolder = (newFolder as NSString)
             .appendingPathComponent(SubtitleClassifier.canonicalFolderName)
 
-        // Subfolder entries get collected first so the sibling pass can
-        // detect target-path collisions against them. Within the
-        // subfolder we also detect intra-Subs/ collisions (two files
-        // composing to the same target name — e.g. `English.srt` and
-        // `Movie.eng.srt` both → `<base>.en.srt`); the second entry is
-        // pre-flagged failed so Apply leaves it in place.
-        var targetPaths: Set<String> = []
+        var allocator = UniqueTargetAllocator()
+
+        // Subfolder entries collected first so they win the un-suffixed
+        // primary names when a sibling later composes to the same target.
         if let subsContainer {
             let subsPath = (videoFolder as NSString).appendingPathComponent(subsContainer)
-            for sub in scanForSubtitles(directory: subsPath, includeSubfolders: false) {
-                let parsed = SubtitleClassifier.parse(filename: sub.filename)
-                let newName = SubtitleClassifier.compose(
-                    base: newStem,
-                    lang: parsed.lang,
-                    forced: parsed.forced,
-                    sdh: parsed.sdh,
-                    ext: (sub.filename as NSString).pathExtension
-                )
-                let newPath = (canonicalSubsFolder as NSString).appendingPathComponent(newName)
-                var asset = SubtitleAsset(
-                    path: sub.path,
-                    newPath: newPath,
+            for sub in scanForSubtitles(directory: subsPath, includeSubfolders: false).sorted(by: { $0.filename < $1.filename }) {
+                let asset = Self.buildAsset(
+                    sourcePath: sub.path,
+                    sourceFilename: sub.filename,
+                    targetFolder: canonicalSubsFolder,
+                    newStem: newStem,
                     originalContainer: subsContainer,
-                    language: parsed.lang,
-                    isForced: parsed.forced,
-                    isSDH: parsed.sdh
+                    allocator: &allocator
                 )
-                if targetPaths.contains(newPath) {
-                    asset.status = .failed
-                    asset.failureReason =
-                        "Conflict: \(newName) collides with another \(subsContainer)/ entry"
-                } else {
-                    targetPaths.insert(newPath)
-                }
                 assets.append(asset)
             }
         }
 
         // Sibling pass.
-        for entry in entries {
+        for entry in sortedEntries {
             let entryPath = (videoFolder as NSString).appendingPathComponent(entry)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: entryPath, isDirectory: &isDir),
                   !isDir.boolValue else { continue }
             let ext = (entry as NSString).pathExtension
             guard SubtitleClassifier.isSubtitleExtension(ext) else { continue }
-            let parsed = SubtitleClassifier.parse(filename: entry)
-            let newName = SubtitleClassifier.compose(
-                base: newStem,
-                lang: parsed.lang,
-                forced: parsed.forced,
-                sdh: parsed.sdh,
-                ext: ext
-            )
             let parentFolder = consolidateSiblings ? canonicalSubsFolder : newFolder
-            let newPath = (parentFolder as NSString).appendingPathComponent(newName)
-
-            var asset = SubtitleAsset(
-                path: entryPath,
-                newPath: newPath,
+            let asset = Self.buildAsset(
+                sourcePath: entryPath,
+                sourceFilename: entry,
+                targetFolder: parentFolder,
+                newStem: newStem,
                 originalContainer: nil,
-                language: parsed.lang,
-                isForced: parsed.forced,
-                isSDH: parsed.sdh
+                allocator: &allocator
             )
-            // Collision with a subfolder entry of the same composed name —
-            // skip the sibling so we never overwrite. User can manually
-            // resolve the duplicate.
-            if consolidateSiblings, targetPaths.contains(newPath) {
-                asset.status = .failed
-                asset.failureReason = "Conflict: \(newName) already exists in Subs/"
-            } else {
-                targetPaths.insert(newPath)
-            }
             assets.append(asset)
         }
 
         // Soft warning: an untagged sibling sub coexisting with a Subs/
-        // folder that has language-tagged entries is, in practice, almost
-        // always a YTS-style duplicate of one of the tagged tracks. The
-        // composed names don't actually collide (untagged → `<base>.srt`,
-        // tagged → `<base>.en.srt`, etc.), so the move would go through
-        // — but the user probably wants to know.
+        // folder that has language-tagged entries is almost always a
+        // YTS-style duplicate of one of the tagged tracks. The composed
+        // names don't actually collide, but the user probably wants to
+        // know.
         let subsHasTaggedTrack = assets.contains { asset in
             asset.originalContainer != nil && asset.language != nil
         }
@@ -643,6 +650,70 @@ final class RenameModel {
         }
 
         return assets
+    }
+
+    /// Composes a target path for one subtitle file, resolving any naming
+    /// collision against the shared allocator with a numeric `.N` suffix.
+    /// Centralized here so the foldered and loose-video code paths share
+    /// the descriptor-aware naming + collision logic.
+    private static func buildAsset(
+        sourcePath: String,
+        sourceFilename: String,
+        targetFolder: String,
+        newStem: String,
+        originalContainer: String?,
+        allocator: inout UniqueTargetAllocator
+    ) -> SubtitleAsset {
+        let parsed = SubtitleClassifier.parse(filename: sourceFilename)
+        let ext = (sourceFilename as NSString).pathExtension
+        let composedName = SubtitleClassifier.compose(
+            base: newStem,
+            lang: parsed.lang,
+            forced: parsed.forced,
+            sdh: parsed.sdh,
+            descriptor: parsed.descriptor,
+            ext: ext
+        )
+        let proposed = (targetFolder as NSString).appendingPathComponent(composedName)
+        let (finalPath, suffixed) = allocator.unique(proposed)
+        return SubtitleAsset(
+            path: sourcePath,
+            newPath: finalPath,
+            originalContainer: originalContainer,
+            language: parsed.lang,
+            isForced: parsed.forced,
+            isSDH: parsed.sdh,
+            descriptor: parsed.descriptor,
+            collisionSuffix: suffixed
+        )
+    }
+
+    /// Stateful allocator that hands out unique target paths. First caller
+    /// gets the proposed path as-is; subsequent callers asking for the
+    /// same path get `.2`, `.3`, … suffixed before the extension.
+    private struct UniqueTargetAllocator {
+        var assigned: Set<String> = []
+
+        mutating func unique(_ proposed: String) -> (path: String, suffixed: Bool) {
+            if !assigned.contains(proposed) {
+                assigned.insert(proposed)
+                return (proposed, false)
+            }
+            let dir = (proposed as NSString).deletingLastPathComponent
+            let basename = (proposed as NSString).lastPathComponent
+            let stem = (basename as NSString).deletingPathExtension
+            let ext = (basename as NSString).pathExtension
+            var n = 2
+            while true {
+                let nextName = ext.isEmpty ? "\(stem).\(n)" : "\(stem).\(n).\(ext)"
+                let candidate = (dir as NSString).appendingPathComponent(nextName)
+                if !assigned.contains(candidate) {
+                    assigned.insert(candidate)
+                    return (candidate, true)
+                }
+                n += 1
+            }
+        }
     }
 
     /// For loose top-level videos: filter the pre-scanned root subtitle
@@ -661,7 +732,10 @@ final class RenameModel {
         let prefixCount = prefix.count
         let separators: Set<Character> = [".", "-", "_", " "]
         var assets: [SubtitleAsset] = []
-        for candidate in candidates {
+        var allocator = UniqueTargetAllocator()
+        // Sorted so collision-suffix numbering is deterministic.
+        let sorted = candidates.sorted(by: { $0.filename < $1.filename })
+        for candidate in sorted {
             let candidateStem = (candidate.filename as NSString)
                 .deletingPathExtension
                 .lowercased()
@@ -672,24 +746,15 @@ final class RenameModel {
                 let boundaryIdx = candidateStem.index(candidateStem.startIndex, offsetBy: prefixCount)
                 guard separators.contains(candidateStem[boundaryIdx]) else { continue }
             }
-            let parsed = SubtitleClassifier.parse(filename: candidate.filename)
-            let ext = (candidate.filename as NSString).pathExtension
-            let newName = SubtitleClassifier.compose(
-                base: newStem,
-                lang: parsed.lang,
-                forced: parsed.forced,
-                sdh: parsed.sdh,
-                ext: ext
-            )
-            let newPath = (newFolder as NSString).appendingPathComponent(newName)
-            assets.append(SubtitleAsset(
-                path: candidate.path,
-                newPath: newPath,
+            let asset = Self.buildAsset(
+                sourcePath: candidate.path,
+                sourceFilename: candidate.filename,
+                targetFolder: newFolder,
+                newStem: newStem,
                 originalContainer: nil,
-                language: parsed.lang,
-                isForced: parsed.forced,
-                isSDH: parsed.sdh
-            ))
+                allocator: &allocator
+            )
+            assets.append(asset)
         }
         return assets
     }
