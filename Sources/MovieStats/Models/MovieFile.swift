@@ -28,9 +28,32 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// look it up via `MovieStore.tmdbDetail(forID:)`.
     var tmdbId: Int?
 
-    /// `"Title (Year)"` when both are available; otherwise just the title.
-    /// Falls back to the filename if parsing produced nothing.
+    /// IMDb tconst pulled from the joined TMDB record. Nil for unmatched
+    /// movies or TMDB records that don't carry an IMDb id.
+    var imdbId: String?
+    /// IMDb's average rating (0–10) when the bulk dataset has been imported
+    /// and this movie has a tconst that's in it. Nil otherwise.
+    var imdbRating: Double?
+    /// Number of IMDb votes that produced `imdbRating`. Used in tooltips.
+    var imdbVotes: Int?
+
+    /// Canonical TMDB title pulled from the joined `tmdb_movies` row.
+    /// Nil for unmatched movies; takes precedence over `parsedTitle` in
+    /// `displayTitle` when present.
+    var tmdbTitle: String?
+    /// TMDB's preferred year (earliest premiere/theatrical across all
+    /// countries), derived from `release_dates` with `release_date` as
+    /// fallback. Same logic the matcher confirmed on.
+    var tmdbYear: Int?
+
+    /// `"Title (Year)"`. Prefers the canonical TMDB title + year when the
+    /// movie has been matched, falling back to the filename-parsed title /
+    /// year (and ultimately the raw filename) when it hasn't.
     var displayTitle: String {
+        if let tmdbTitle, !tmdbTitle.isEmpty {
+            if let year = tmdbYear { return "\(tmdbTitle) (\(year))" }
+            return tmdbTitle
+        }
         if parsedTitle.isEmpty { return filename }
         if let year = parsedYear { return "\(parsedTitle) (\(year))" }
         return parsedTitle

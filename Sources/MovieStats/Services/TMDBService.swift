@@ -186,6 +186,18 @@ struct TMDBMovieDetail: Codable, Sendable, Hashable {
     /// Skips Digital (4), Physical (5), and TV (6) — those don't move the
     /// canonical "year of release" needle.
     var preferredReleaseDate: String? {
+        Self.preferredReleaseDate(releaseDates: releaseDates, releaseDate: releaseDate)
+    }
+
+    /// Static counterpart usable from places that only have the raw
+    /// columns (notably `MovieStore.makeMovie` where the main library
+    /// list query JOINs onto `tmdb_movies` and we want to derive the
+    /// canonical year for display without rebuilding a full
+    /// `TMDBMovieDetail`).
+    static func preferredReleaseDate(
+        releaseDates: TMDBReleaseDates?,
+        releaseDate: String?
+    ) -> String? {
         // Types: 1=Premiere, 2=Theatrical (limited), 3=Theatrical.
         let theatricalTypes: Set<Int> = [1, 2, 3]
         var earliest: String?

@@ -65,6 +65,12 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+
+        Window("IMDb Ratings", id: "imdb-ratings") {
+            IMDbView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 
     /// Opens an NSAlert with an inline text field for the user's TMDB API

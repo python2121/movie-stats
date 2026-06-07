@@ -145,6 +145,25 @@ final class MovieStore {
             try exec("ALTER TABLE tmdb_movies ADD COLUMN release_dates_json TEXT;")
         }
 
+        // IMDb ratings — bulk-loaded from `title.ratings.tsv.gz` on demand.
+        // Joined into the main movies query via tmdb_movies.imdb_id.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS imdb_ratings (
+                imdb_id    TEXT PRIMARY KEY,
+                avg_rating REAL NOT NULL,
+                num_votes  INTEGER NOT NULL
+            );
+            """)
+        // Single-row metadata: when we last pulled the dataset + how many
+        // ratings landed. CHECK constraint pins the table to one row.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS imdb_metadata (
+                id                 INTEGER PRIMARY KEY CHECK (id = 1),
+                last_downloaded_at REAL,
+                entry_count        INTEGER
+            );
+            """)
+
         if needsTitleBackfill {
             try backfillParsedTitles()
         }
@@ -261,21 +280,30 @@ final class MovieStore {
         }
     }
 
-    /// Every persisted movie with full metadata, ordered by filename.
+    /// Every persisted movie with full metadata, ordered by filename. Left-
+    /// joins the TMDB record to pick up the IMDb ID, the canonical title +
+    /// release date payload for the displayed name, then left-joins the
+    /// IMDb ratings cache. Unmatched movies / missing ratings are left
+    /// nil — the view layer handles the absence.
     func allMovies() throws -> [MovieFile] {
         let sql = """
-            SELECT path, filename, size, date_scanned,
-                   width, height, duration, bitrate,
-                   video_codec, container, pix_fmt,
-                   is_10bit, hdr_format, has_dolby_vision,
-                   video_tracks, audio_tracks, subtitle_tracks,
-                   audio_codecs, audio_channels, audio_languages,
-                   subtitle_codecs, subtitle_languages,
-                   movie_type, probed_at,
-                   parsed_title, parsed_year,
-                   tmdb_id
-            FROM movies
-            ORDER BY filename COLLATE NOCASE;
+            SELECT m.path, m.filename, m.size, m.date_scanned,
+                   m.width, m.height, m.duration, m.bitrate,
+                   m.video_codec, m.container, m.pix_fmt,
+                   m.is_10bit, m.hdr_format, m.has_dolby_vision,
+                   m.video_tracks, m.audio_tracks, m.subtitle_tracks,
+                   m.audio_codecs, m.audio_channels, m.audio_languages,
+                   m.subtitle_codecs, m.subtitle_languages,
+                   m.movie_type, m.probed_at,
+                   m.parsed_title, m.parsed_year,
+                   m.tmdb_id,
+                   t.imdb_id,
+                   r.avg_rating, r.num_votes,
+                   t.title, t.release_date, t.release_dates_json
+            FROM movies m
+            LEFT JOIN tmdb_movies t ON m.tmdb_id = t.tmdb_id
+            LEFT JOIN imdb_ratings r ON t.imdb_id = r.imdb_id
+            ORDER BY m.filename COLLATE NOCASE;
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -547,7 +575,88 @@ final class MovieStore {
         movie.parsedTitle = readNullableText(stmt, 24) ?? ""
         movie.parsedYear = readNullableInt(stmt, 25)
         movie.tmdbId = readNullableInt(stmt, 26)
+        movie.imdbId = readNullableText(stmt, 27)
+        movie.imdbRating = readNullableDouble(stmt, 28)
+        movie.imdbVotes = readNullableInt(stmt, 29)
+        movie.tmdbTitle = readNullableText(stmt, 30)
+        // Canonical year: same earliest-theatrical pick the matcher
+        // confirmed on. Computed in Swift from release_dates_json (when
+        // present) with release_date as fallback.
+        let releaseDate = readNullableText(stmt, 31)
+        let releaseDates: TMDBReleaseDates? = decodeJSON(readNullableText(stmt, 32))
+        if let date = TMDBMovieDetail.preferredReleaseDate(
+            releaseDates: releaseDates,
+            releaseDate: releaseDate
+        ), date.count >= 4 {
+            movie.tmdbYear = Int(date.prefix(4))
+        }
         return movie
+    }
+
+    // MARK: - IMDb dataset
+
+    /// Drops the existing IMDb ratings and bulk-inserts the supplied set
+    /// in a single transaction. Returns the count actually written.
+    /// Pinned to one transaction so the table never appears half-loaded
+    /// to other reads.
+    @discardableResult
+    func replaceAllIMDbRatings(_ ratings: [(imdbID: String, rating: Double, votes: Int)]) throws -> Int {
+        try exec("BEGIN IMMEDIATE TRANSACTION;")
+        var inserted = 0
+        do {
+            try exec("DELETE FROM imdb_ratings;")
+            let sql = "INSERT INTO imdb_ratings (imdb_id, avg_rating, num_votes) VALUES (?, ?, ?);"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw MovieStoreError.prepare(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(stmt) }
+            for row in ratings {
+                sqlite3_bind_text(stmt, 1, row.imdbID, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_double(stmt, 2, row.rating)
+                sqlite3_bind_int64(stmt, 3, Int64(row.votes))
+                guard sqlite3_step(stmt) == SQLITE_DONE else {
+                    throw MovieStoreError.exec(lastErrorMessage())
+                }
+                sqlite3_reset(stmt)
+                inserted += 1
+            }
+            // Single-row metadata upsert.
+            try exec("""
+                INSERT OR REPLACE INTO imdb_metadata (id, last_downloaded_at, entry_count)
+                VALUES (1, \(Date().timeIntervalSince1970), \(inserted));
+                """)
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+        return inserted
+    }
+
+    /// Single rating lookup by tconst. Used for ad-hoc queries; the main
+    /// library list already JOINs and hydrates this via `allMovies`.
+    func imdbRating(forIMDbID id: String) -> (rating: Double, votes: Int)? {
+        let sql = "SELECT avg_rating, num_votes FROM imdb_ratings WHERE imdb_id = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return (sqlite3_column_double(stmt, 0), Int(sqlite3_column_int64(stmt, 1)))
+    }
+
+    /// Returns the dataset's last-downloaded timestamp + how many ratings
+    /// are cached. Both nil if the user has never imported.
+    func imdbMetadata() -> (lastDownloadedAt: Date?, entryCount: Int) {
+        let sql = "SELECT last_downloaded_at, entry_count FROM imdb_metadata WHERE id = 1;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return (nil, 0) }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return (nil, 0) }
+        let ts = readNullableDouble(stmt, 0)
+        let count = readNullableInt(stmt, 1) ?? 0
+        return (ts.map { Date(timeIntervalSince1970: $0) }, count)
     }
 
     // MARK: - Binding helpers

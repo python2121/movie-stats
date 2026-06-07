@@ -240,7 +240,7 @@ struct ContentView: View {
                                 Text(byteString(entry.movie.size))
                                     .font(.callout.monospacedDigit())
                                     .foregroundStyle(.secondary)
-                                tmdbCheckmark(for: entry.movie)
+                                imdbRatingChip(for: entry.movie)
                             }
                             .help(entry.movie.path)
                             .contentShape(Rectangle())
@@ -315,15 +315,39 @@ struct ContentView: View {
         }
     }
 
-    /// A small green checkmark right of the size column when this file has
-    /// been matched to a TMDB record. Hidden otherwise (no width reserved).
+    /// IMDb rating chip — yellow-star + score — shown right of the size
+    /// column when the movie has a TMDB match that carries an IMDb id AND
+    /// that id is present in the imported IMDb ratings dataset. Hidden
+    /// otherwise (no width reserved), so unmatched / un-rated rows fall
+    /// back to the existing layout.
     @ViewBuilder
-    private func tmdbCheckmark(for movie: MovieFile) -> some View {
-        if movie.tmdbId != nil {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .help("Matched to TMDB")
+    private func imdbRatingChip(for movie: MovieFile) -> some View {
+        if let rating = movie.imdbRating {
+            HStack(spacing: 3) {
+                Image(systemName: "star.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.yellow)
+                Text(String(format: "%.1f", rating))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Color.yellow.opacity(0.15), in: Capsule())
+            .fixedSize()
+            .help(ratingTooltip(rating: rating, votes: movie.imdbVotes))
         }
+    }
+
+    /// Used by `imdbRatingChip` so the hover-help wording follows whether
+    /// we have a vote count to show.
+    private func ratingTooltip(rating: Double, votes: Int?) -> String {
+        let base = String(format: "IMDb: %.1f / 10", rating)
+        guard let votes else { return base }
+        let formatted = NumberFormatter.localizedString(
+            from: NSNumber(value: votes), number: .decimal
+        )
+        return "\(base)  (\(formatted) votes)"
     }
 
     /// Type/HDR/DV/10-bit pills shown next to a movie's filename.
@@ -588,6 +612,13 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Rename matched movies into the canonical Plex / Jellyfin folder + filename format")
+
+            Button {
+                openWindow(id: "imdb-ratings")
+            } label: {
+                Label("IMDb Ratings", systemImage: "star.bubble")
+            }
+            .help("Download / refresh the IMDb bulk ratings dataset")
 
             Button {
                 chatOpen.toggle()
