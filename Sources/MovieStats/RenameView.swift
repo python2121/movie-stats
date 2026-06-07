@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// "Rename Library" window. Three-column table with current path, proposed
@@ -203,16 +204,7 @@ struct RenameView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.proposedDisplay)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .help(row.proposedDisplay)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            proposedCell(for: row)
 
             Divider()
 
@@ -227,6 +219,42 @@ struct RenameView: View {
             .padding(.vertical, 8)
         }
         .background(rowBackground(row: row, isCurrent: isCurrent))
+    }
+
+    /// Two-line proposed-path cell: folder on top, filename indented
+    /// beneath. Cleaner read than the old single-line truncated path —
+    /// you can see the new folder name and the new file name at a glance
+    /// without scanning the whole string.
+    @ViewBuilder
+    private func proposedCell(for row: RenameModel.Row) -> some View {
+        let (folder, filename) = splitProposedPath(row.proposedDisplay)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("/" + folder)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Text("/" + filename)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .padding(.leading, 12)
+        }
+        .help(row.proposedDisplay)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    /// Splits `<folder-portion>/<filename>` into its two halves. The
+    /// folder portion may itself contain slashes (e.g. `Marvel/Avengers
+    /// (2012) {tmdb-N}`) — that's fine, we only break on the final
+    /// separator.
+    private func splitProposedPath(_ path: String) -> (folder: String, filename: String) {
+        guard let lastSlash = path.lastIndex(of: "/") else { return ("", path) }
+        let folder = String(path[..<lastSlash])
+        let filename = String(path[path.index(after: lastSlash)...])
+        return (folder, filename)
     }
 
     @ViewBuilder
@@ -264,6 +292,12 @@ struct RenameView: View {
                 model.setAllIncluded(!model.allIncluded)
             }
             .disabled(model.rows.isEmpty || model.isApplying)
+
+            Button("Copy Preview") {
+                copyPreview(rows: model.rows)
+            }
+            .disabled(model.rows.isEmpty)
+            .help("Copy the whole table to the clipboard as plain text for review (e.g. paste into an LLM to vet)")
 
             if let error = model.lastError {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -339,6 +373,69 @@ struct RenameView: View {
             return "\(parent)/\(filename)"
         }
         return filename
+    }
+
+    // MARK: - Copy Preview
+
+    /// Serializes every row + subtitle plan into a plain-text dump and
+    /// puts it on the system clipboard. The format is intentionally
+    /// boring (per-row blocks with named fields) so an LLM can scan it
+    /// end-to-end without confusing layout.
+    private func copyPreview(rows: [RenameModel.Row]) {
+        let text = formatPreview(rows: rows)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func formatPreview(rows: [RenameModel.Row]) -> String {
+        var lines: [String] = []
+        let included = rows.filter { $0.included }.count
+        lines.append("# Movie Stats — Rename Preview")
+        lines.append("")
+        lines.append("Canonical naming format: `Title (Year) {tmdb-N}/Title (Year) {tmdb-N}[ [Remux]].ext`")
+        lines.append("Subtitle convention: sidecars and contents of `Subs/` (or aliases) consolidate into a canonical `Subs/`.")
+        lines.append("")
+        lines.append("Total rows: \(rows.count)  ·  Selected for apply: \(included)")
+        lines.append("")
+
+        for (idx, row) in rows.enumerated() {
+            let status = row.included ? "[INCLUDE]" : "[SKIP]"
+            lines.append("=== Row \(idx + 1) \(status) ===")
+            lines.append("CURRENT:  \(row.currentDisplay)")
+            lines.append("PROPOSED: \(row.proposedDisplay)")
+
+            var flags: [String] = []
+            if row.hasSpecialCharacters { flags.append("special chars") }
+            if row.isRemux { flags.append("Remux") }
+            if row.plan == .createFolderAndMove { flags.append("loose top-level (creates wrapper)") }
+            if !flags.isEmpty {
+                lines.append("FLAGS:    \(flags.joined(separator: ", "))")
+            }
+
+            if !row.subtitles.isEmpty {
+                lines.append("SUBS (\(row.subtitles.count)):")
+                for sub in row.subtitles {
+                    let oldName = subtitleDisplayName(path: sub.path)
+                    let newName = subtitleDisplayName(path: sub.newPath)
+                    var subLine = "  • \(oldName)  →  \(newName)"
+                    var tags: [String] = []
+                    if let lang = sub.language { tags.append(lang) }
+                    if sub.isForced { tags.append("forced") }
+                    if sub.isSDH { tags.append("sdh") }
+                    if !tags.isEmpty { subLine += "  [\(tags.joined(separator: " "))]" }
+                    lines.append(subLine)
+                    if let warning = sub.warningReason {
+                        lines.append("    ⚠ WARN: \(warning)")
+                    }
+                    if let reason = sub.failureReason {
+                        lines.append("    ✗ FAIL: \(reason)")
+                    }
+                }
+            }
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
     }
 }
 

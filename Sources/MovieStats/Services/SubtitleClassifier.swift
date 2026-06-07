@@ -40,12 +40,18 @@ enum SubtitleClassifier {
     }
 
     /// Pulls the language code + qualifier flags out of a filename like
-    /// `Movie.2020.eng.forced.srt`. Splits on common separators, matches
-    /// each token against the language / qualifier tables. Returns the
-    /// first language match it finds.
+    /// `Movie.2020.eng.forced.srt`. Splits on common separators (including
+    /// parens / brackets so `English (CC)` and `English [SDH]` tokenize
+    /// cleanly into `english` + `cc` / `sdh`), matches each token against
+    /// the language / qualifier tables. Returns the first language match
+    /// it finds.
     static func parse(filename: String) -> (lang: String?, forced: Bool, sdh: Bool) {
         let stem = (filename as NSString).deletingPathExtension
-        let tokens = stem.split(whereSeparator: { ".-_ ".contains($0) }).map { $0.lowercased() }
+        // Separators include parens and square brackets so subtitle
+        // filenames like `English (CC).eng.srt` and `English [SDH].eng.srt`
+        // produce tokens like `english`, `cc`, `sdh` — which the qualifier
+        // tables already recognize.
+        let tokens = stem.split(whereSeparator: { ".-_ ()[]".contains($0) }).map { $0.lowercased() }
         var lang: String?
         var forced = false
         var sdh = false
@@ -101,7 +107,7 @@ enum SubtitleClassifier {
             ("nl", ["nl", "nld", "dut", "dutch"]),
             ("pl", ["pl", "pol", "polish"]),
             ("sv", ["sv", "swe", "swedish"]),
-            ("no", ["no", "nor", "norwegian"]),
+            ("no", ["no", "nor", "nob", "nno", "norwegian"]),
             ("da", ["da", "dan", "danish"]),
             ("fi", ["fi", "fin", "finnish"]),
             ("tr", ["tr", "tur", "turkish"]),
@@ -119,6 +125,16 @@ enum SubtitleClassifier {
             ("id", ["id", "ind", "indonesian"]),
             ("ms", ["ms", "msa", "may", "malay"]),
             ("fa", ["fa", "per", "fas", "persian", "farsi"]),
+            // Languages that appeared in scene releases as 3-letter codes
+            // and fell through to the "no language detected" bucket,
+            // causing avoidable conflicts on `.srt` (untagged) when
+            // consolidated into Subs/.
+            ("lv", ["lv", "lav", "latvian"]),
+            ("lt", ["lt", "lit", "lithuanian"]),
+            ("sk", ["sk", "slo", "slk", "slovak"]),
+            ("sl", ["sl", "slv", "slovene", "slovenian"]),
+            ("et", ["et", "est", "estonian"]),
+            ("hr", ["hr", "hrv", "croatian"]),
         ]
         for entry in entries {
             for alias in entry.aliases { m[alias] = entry.canonical }

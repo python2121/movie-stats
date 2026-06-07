@@ -43,15 +43,27 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     var tmdbTitle: String?
     /// TMDB's preferred year (earliest premiere/theatrical across all
     /// countries), derived from `release_dates` with `release_date` as
-    /// fallback. Same logic the matcher confirmed on.
+    /// fallback. Used as a fallback when `confirmedYear` isn't set.
     var tmdbYear: Int?
+    /// Locked-in year from the matcher — exactly what the user saw and
+    /// signed off on at confirm time. Wins over `tmdbYear` because TMDB's
+    /// search and details endpoints don't always agree on `release_date`
+    /// (the Perfect Blue / Miracle Mile festival-year case).
+    var confirmedYear: Int?
+
+    /// Year to use when rendering this movie everywhere outside of the
+    /// matcher itself. Precedence: matcher's locked-in confirmation →
+    /// TMDB's preferred-release year → filename-parsed year.
+    var effectiveYear: Int? {
+        confirmedYear ?? tmdbYear ?? parsedYear
+    }
 
     /// `"Title (Year)"`. Prefers the canonical TMDB title + year when the
     /// movie has been matched, falling back to the filename-parsed title /
     /// year (and ultimately the raw filename) when it hasn't.
     var displayTitle: String {
         if let tmdbTitle, !tmdbTitle.isEmpty {
-            if let year = tmdbYear { return "\(tmdbTitle) (\(year))" }
+            if let year = confirmedYear ?? tmdbYear { return "\(tmdbTitle) (\(year))" }
             return tmdbTitle
         }
         if parsedTitle.isEmpty { return filename }

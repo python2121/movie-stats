@@ -349,7 +349,19 @@ final class MatcherModel {
                     posterPath: detail.posterPath
                 )
 
-                try appModel.store?.setTMDBMatch(forPath: entry.path, tmdbID: tmdbID)
+                // Lock in the exact year the matcher showed for this row.
+                // `candidateDisplayTitle` uses `preferredYear ?? candidate.year`
+                // — that's what the user saw next to the title and agreed
+                // to when checking the box. Persisting it sidesteps the
+                // search-endpoint-vs-details-endpoint year drift in TMDB.
+                let row = rows.first(where: { $0.path == entry.path })
+                let yearString = row?.preferredYear ?? entry.candidate.year
+                let confirmedYear = yearString.flatMap(Int.init)
+                try appModel.store?.setTMDBMatch(
+                    forPath: entry.path,
+                    tmdbID: tmdbID,
+                    confirmedYear: confirmedYear
+                )
                 confirmedPaths.insert(entry.path)
             } catch {
                 lastError = "\(entry.candidate.title): \(error.localizedDescription)"

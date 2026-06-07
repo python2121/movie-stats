@@ -91,7 +91,9 @@ final class MovieStore {
             ("movie_type", "TEXT"),
             ("probed_at", "REAL"),
             ("tmdb_id", "INTEGER"),
+            ("confirmed_year", "INTEGER"),
         ]
+        let needsConfirmedYearBackfill = !present.contains("confirmed_year")
         for col in columns where !present.contains(col.name) {
             try exec("ALTER TABLE movies ADD COLUMN \(col.name) \(col.ddl);")
         }
@@ -166,6 +168,19 @@ final class MovieStore {
 
         if needsTitleBackfill {
             try backfillParsedTitles()
+        }
+        if needsConfirmedYearBackfill {
+            // One-time: for movies already matched to a TMDB record before
+            // the confirmed_year column existed, use the filename's parsed
+            // year as a best-guess of "what the user matched on". Newly-
+            // confirmed rows populate confirmed_year directly.
+            try exec("""
+                UPDATE movies
+                SET confirmed_year = parsed_year
+                WHERE tmdb_id IS NOT NULL
+                  AND confirmed_year IS NULL
+                  AND parsed_year IS NOT NULL;
+                """)
         }
     }
 
@@ -299,7 +314,8 @@ final class MovieStore {
                    m.tmdb_id,
                    t.imdb_id,
                    r.avg_rating, r.num_votes,
-                   t.title, t.release_date, t.release_dates_json
+                   t.title, t.release_date, t.release_dates_json,
+                   m.confirmed_year
             FROM movies m
             LEFT JOIN tmdb_movies t ON m.tmdb_id = t.tmdb_id
             LEFT JOIN imdb_ratings r ON t.imdb_id = r.imdb_id
@@ -411,12 +427,19 @@ final class MovieStore {
 
     // MARK: - TMDB matches
 
-    /// Sets `movies.tmdb_id` for one file. Doesn't touch the `tmdb_movies`
-    /// row — caller is expected to persist the detail separately via
-    /// `upsertTMDBDetail` (so multiple file copies of the same movie share
-    /// one row in `tmdb_movies`).
-    func setTMDBMatch(forPath path: String, tmdbID: Int?) throws {
-        let sql = "UPDATE movies SET tmdb_id = ? WHERE path = ?;"
+    /// Sets `movies.tmdb_id` and the locked-in `confirmed_year` for one
+    /// file. The confirmed year is the year the matcher *showed the user*
+    /// at the moment of confirm — pre-computed by the matcher (preferred
+    /// post-mismatch year, falling back to the search-result year) — so
+    /// downstream features (rename, display) use the exact year the user
+    /// signed off on, even if TMDB's persisted release_date later derives
+    /// to something different.
+    ///
+    /// Doesn't touch the `tmdb_movies` row — caller persists the detail
+    /// separately via `upsertTMDBDetail` (so multiple file copies of the
+    /// same movie share one row in `tmdb_movies`).
+    func setTMDBMatch(forPath path: String, tmdbID: Int?, confirmedYear: Int?) throws {
+        let sql = "UPDATE movies SET tmdb_id = ?, confirmed_year = ? WHERE path = ?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw MovieStoreError.prepare(lastErrorMessage())
@@ -427,7 +450,12 @@ final class MovieStore {
         } else {
             sqlite3_bind_null(stmt, 1)
         }
-        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT)
+        if let confirmedYear {
+            sqlite3_bind_int64(stmt, 2, Int64(confirmedYear))
+        } else {
+            sqlite3_bind_null(stmt, 2)
+        }
+        sqlite3_bind_text(stmt, 3, path, -1, SQLITE_TRANSIENT)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw MovieStoreError.exec(lastErrorMessage())
         }
@@ -579,9 +607,9 @@ final class MovieStore {
         movie.imdbRating = readNullableDouble(stmt, 28)
         movie.imdbVotes = readNullableInt(stmt, 29)
         movie.tmdbTitle = readNullableText(stmt, 30)
-        // Canonical year: same earliest-theatrical pick the matcher
-        // confirmed on. Computed in Swift from release_dates_json (when
-        // present) with release_date as fallback.
+        // Canonical year derived from TMDB's release_dates. This is the
+        // fallback when no `confirmed_year` is set on the movie row — i.e.
+        // pre-confirmed-year DB rows, or unmatched movies.
         let releaseDate = readNullableText(stmt, 31)
         let releaseDates: TMDBReleaseDates? = decodeJSON(readNullableText(stmt, 32))
         if let date = TMDBMovieDetail.preferredReleaseDate(
@@ -590,6 +618,7 @@ final class MovieStore {
         ), date.count >= 4 {
             movie.tmdbYear = Int(date.prefix(4))
         }
+        movie.confirmedYear = readNullableInt(stmt, 33)
         return movie
     }
 

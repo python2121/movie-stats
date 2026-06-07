@@ -23,9 +23,13 @@ enum FilenameSanitizer {
     /// touching legitimate unicode (diacritics, non-Latin scripts, etc.).
     static func sanitize(_ raw: String) -> String {
         var s = raw
-        // `:` is super common in movie titles ("Star Wars: A New Hope").
-        // Replace with " -" so the meaning survives on Windows / SMB.
-        s = s.replacingOccurrences(of: ":", with: " -")
+        // `:` is super common in movie titles ("Star Wars: A New Hope",
+        // "3:10 to Yuma"). Replace with " - " (spaces on BOTH sides) so
+        // the meaning survives on Windows / SMB and the dash never visually
+        // attaches to an adjacent token (avoiding "3 -10" reading as
+        // negative ten). The whitespace-collapse pass below cleans up the
+        // double-space that this produces when the original was ": ".
+        s = s.replacingOccurrences(of: ":", with: " - ")
         // Path separators.
         s = s.replacingOccurrences(of: "/", with: "-")
         s = s.replacingOccurrences(of: "\\", with: "-")

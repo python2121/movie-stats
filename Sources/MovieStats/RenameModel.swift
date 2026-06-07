@@ -180,13 +180,18 @@ final class RenameModel {
                 containerDir = (parent as NSString).deletingLastPathComponent
             }
 
-            // Year comes from TMDB only — same value the matcher locked in
-            // when this row was confirmed (TMDBMovieDetail.year, derived
-            // from preferredReleaseDate = earliest premiere/theatrical
-            // across all countries). If TMDB has no usable date at all,
-            // the canonical name just drops the parens-year and leans on
-            // {tmdb-N} for identification.
-            let year: Int? = detail.year.flatMap(Int.init)
+            // Year precedence:
+            //   1. `confirmed_year` from movies — the exact year the
+            //      matcher showed and the user signed off on. Wins
+            //      because TMDB's search and details endpoints don't
+            //      always agree (Perfect Blue / Miracle Mile).
+            //   2. `detail.year` from preferredReleaseDate as a fallback
+            //      for any matched row predating the confirmed_year
+            //      column that the migration's parsed_year backfill
+            //      didn't cover.
+            //   3. nil → the canonical name drops the parens-year and
+            //      leans on `{tmdb-N}` for identification.
+            let year: Int? = movie.confirmedYear ?? detail.year.flatMap(Int.init)
 
             let isRemux = FilenameSanitizer.containsRemux(movie.path)
             let folderName = FilenameSanitizer.folderName(
