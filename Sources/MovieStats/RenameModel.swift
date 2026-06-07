@@ -269,8 +269,13 @@ final class RenameModel {
                 )
             }
 
-            // Already canonical and no subtitle work to do — skip.
-            if newPath == movie.path && subtitles.isEmpty { continue }
+            // Already canonical and no subtitle work to do — skip. Both
+            // halves must be at their proposed paths: empty subtitle list
+            // is the trivial case, but a populated list where every entry
+            // already sits at its target counts too (e.g. a freshly-
+            // imported release that was already named to our convention).
+            let allSubtitlesCanonical = subtitles.allSatisfy { $0.path == $0.newPath }
+            if newPath == movie.path && allSubtitlesCanonical { continue }
 
             let currentDisplay = Self.displayPath(movie.path, rootStd: rootStd)
             let proposedDisplay = Self.displayPath(newPath, rootStd: rootStd)
