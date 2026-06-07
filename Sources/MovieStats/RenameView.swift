@@ -296,6 +296,8 @@ struct RenameView: View {
         let count = row.subtitles.count
         let failed = row.subtitles.filter { $0.status == .failed }.count
         if failed > 0 { return "\(count) sub\(count == 1 ? "" : "s") · \(failed) failed" }
+        let warned = row.subtitles.filter { $0.warningReason != nil }.count
+        if warned > 0 { return "\(count) sub\(count == 1 ? "" : "s") · \(warned) review" }
         return "\(count) sub\(count == 1 ? "" : "s")"
     }
 
@@ -305,6 +307,8 @@ struct RenameView: View {
         let allSucceeded = !row.subtitles.isEmpty
             && row.subtitles.allSatisfy { $0.status == .succeeded }
         if allSucceeded { return .green }
+        let hasWarning = row.subtitles.contains { $0.warningReason != nil }
+        if hasWarning { return .yellow }
         return .teal
     }
 
@@ -320,6 +324,7 @@ struct RenameView: View {
             if let lang = sub.language { line += "  [\(lang)]" }
             if sub.isForced { line += " forced" }
             if sub.isSDH { line += " sdh" }
+            if let warning = sub.warningReason { line += "\n  • \(warning)" }
             if let reason = sub.failureReason { line += "\n  ⚠️ \(reason)" }
             return line
         }.joined(separator: "\n")

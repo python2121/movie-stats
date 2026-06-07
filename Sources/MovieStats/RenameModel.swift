@@ -76,6 +76,13 @@ final class RenameModel {
         let isSDH: Bool
         var status: Status = .pending
         var failureReason: String?
+        /// Soft warning surfaced in the preview — set at plan-build for
+        /// things that aren't strictly errors but the user might want to
+        /// review (e.g. an untagged sibling sub when the Subs/ folder
+        /// already carries language-tagged tracks: probably a duplicate
+        /// content-wise, but our composed names don't collide so Apply
+        /// would still go through unless the user unchecks the row).
+        var warningReason: String?
 
         var id: String { path }
 
@@ -534,7 +541,11 @@ final class RenameModel {
             .appendingPathComponent(SubtitleClassifier.canonicalFolderName)
 
         // Subfolder entries get collected first so the sibling pass can
-        // detect target-path collisions against them.
+        // detect target-path collisions against them. Within the
+        // subfolder we also detect intra-Subs/ collisions (two files
+        // composing to the same target name — e.g. `English.srt` and
+        // `Movie.eng.srt` both → `<base>.en.srt`); the second entry is
+        // pre-flagged failed so Apply leaves it in place.
         var targetPaths: Set<String> = []
         if let subsContainer {
             let subsPath = (videoFolder as NSString).appendingPathComponent(subsContainer)
@@ -548,15 +559,22 @@ final class RenameModel {
                     ext: (sub.filename as NSString).pathExtension
                 )
                 let newPath = (canonicalSubsFolder as NSString).appendingPathComponent(newName)
-                targetPaths.insert(newPath)
-                assets.append(SubtitleAsset(
+                var asset = SubtitleAsset(
                     path: sub.path,
                     newPath: newPath,
                     originalContainer: subsContainer,
                     language: parsed.lang,
                     isForced: parsed.forced,
                     isSDH: parsed.sdh
-                ))
+                )
+                if targetPaths.contains(newPath) {
+                    asset.status = .failed
+                    asset.failureReason =
+                        "Conflict: \(newName) collides with another \(subsContainer)/ entry"
+                } else {
+                    targetPaths.insert(newPath)
+                }
+                assets.append(asset)
             }
         }
 
@@ -597,6 +615,26 @@ final class RenameModel {
                 targetPaths.insert(newPath)
             }
             assets.append(asset)
+        }
+
+        // Soft warning: an untagged sibling sub coexisting with a Subs/
+        // folder that has language-tagged entries is, in practice, almost
+        // always a YTS-style duplicate of one of the tagged tracks. The
+        // composed names don't actually collide (untagged → `<base>.srt`,
+        // tagged → `<base>.en.srt`, etc.), so the move would go through
+        // — but the user probably wants to know.
+        let subsHasTaggedTrack = assets.contains { asset in
+            asset.originalContainer != nil && asset.language != nil
+        }
+        if subsHasTaggedTrack {
+            for i in assets.indices
+            where assets[i].originalContainer == nil
+                    && assets[i].language == nil
+                    && assets[i].status != .failed
+            {
+                assets[i].warningReason =
+                    "Untagged sibling — may duplicate a language-tagged Subs/ entry"
+            }
         }
 
         return assets
