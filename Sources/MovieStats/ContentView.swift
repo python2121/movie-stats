@@ -582,6 +582,14 @@ struct ContentView: View {
             .help("Match unmatched movies to TMDB and cache the metadata")
 
             Button {
+                openWindow(id: "rename-library")
+            } label: {
+                Label("Rename Library", systemImage: "pencil.line")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Rename matched movies into the canonical Plex / Jellyfin folder + filename format")
+
+            Button {
                 chatOpen.toggle()
             } label: {
                 Label("Query the AI God", systemImage: "sparkles")

@@ -363,6 +363,24 @@ final class MovieStore {
         try exec("UPDATE movies SET probed_at = NULL;")
     }
 
+    /// Re-keys a movie row to a new on-disk location after a rename or move.
+    /// The TMDB match, probed metadata, and parsed-title columns all stay
+    /// intact because we're updating in place rather than insert-delete.
+    func updatePath(oldPath: String, newPath: String, newFilename: String) throws {
+        let sql = "UPDATE movies SET path = ?, filename = ? WHERE path = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, newPath, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, newFilename, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 3, oldPath, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
     // MARK: - TMDB matches
 
     /// Sets `movies.tmdb_id` for one file. Doesn't touch the `tmdb_movies`

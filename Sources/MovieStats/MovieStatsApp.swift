@@ -59,6 +59,12 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
+
+        Window("Rename Library", id: "rename-library") {
+            RenameView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 
     /// Opens an NSAlert with an inline text field for the user's TMDB API
