@@ -34,6 +34,13 @@ final class RenameModel {
         /// trouble chars the sanitizer rewrites — used to sort these rows
         /// to the top.
         let hasSpecialCharacters: Bool
+        /// True when this row competes with one or more other rows for the
+        /// exact same destination path (i.e. two different source files
+        /// matched to the same TMDB ID). Surfaced in the UI as a red
+        /// "duplicate" chip, and these rows start unchecked so the user
+        /// is forced to reconcile before Apply rather than silently
+        /// failing the second one with `targetFolderExists`.
+        var duplicateConflict: Bool = false
         /// Whether this row will be applied on the next Apply pass.
         var included: Bool = true
         var status: Status = .pending
@@ -300,10 +307,30 @@ final class RenameModel {
             ))
         }
 
-        // Special-character rows float to the top of the table because
-        // those are the ones the user cares most about cleaning up. Within
-        // each bucket, alphabetical by current display path.
+        // Duplicate-target detection: when two source files matched to
+        // the same TMDB ID, both rows propose the identical destination
+        // path. Without intervention the first row would succeed and the
+        // rest would silently fail Apply with `targetFolderExists`.
+        // Mark every member of a colliding group and uncheck them so the
+        // user resolves the dup (delete one, match one to a different
+        // TMDB id, etc.) before clicking Apply.
+        var targetCounts: [String: Int] = [:]
+        for row in newRows { targetCounts[row.newPath, default: 0] += 1 }
+        for i in newRows.indices where (targetCounts[newRows[i].newPath] ?? 0) > 1 {
+            newRows[i].duplicateConflict = true
+            newRows[i].included = false
+        }
+
+        // Sort: duplicates float highest (so the user sees the conflict
+        // immediately and the colliding rows land adjacent via newPath),
+        // then special-character rows, then alphabetical by current path.
         newRows.sort { a, b in
+            if a.duplicateConflict != b.duplicateConflict {
+                return a.duplicateConflict && !b.duplicateConflict
+            }
+            if a.duplicateConflict, a.newPath != b.newPath {
+                return a.newPath.localizedStandardCompare(b.newPath) == .orderedAscending
+            }
             if a.hasSpecialCharacters != b.hasSpecialCharacters {
                 return a.hasSpecialCharacters && !b.hasSpecialCharacters
             }

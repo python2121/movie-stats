@@ -238,6 +238,10 @@ struct RenameView: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                     .help(row.currentDisplay)
+                if row.duplicateConflict {
+                    StatusChip(text: "duplicate", color: .red)
+                        .help("Another row targets the same canonical path (likely two source files matched to the same TMDB id). Unchecked by default — reconcile before Apply: delete the redundant copy or re-match one to a different movie.")
+                }
                 if row.hasSpecialCharacters {
                     StatusChip(text: "special chars", color: .orange)
                 }
@@ -486,6 +490,7 @@ struct RenameView: View {
             lines.append("PROPOSED: \(row.proposedDisplay)")
 
             var flags: [String] = []
+            if row.duplicateConflict { flags.append("DUPLICATE — same target as another row") }
             if row.hasSpecialCharacters { flags.append("special chars") }
             if row.isRemux { flags.append("Remux") }
             if row.plan == .createFolderAndMove { flags.append("loose top-level (creates wrapper)") }
