@@ -598,24 +598,11 @@ final class RenameModel {
 
         var allocator = UniqueTargetAllocator()
 
-        // Subfolder entries collected first so they win the un-suffixed
-        // primary names when a sibling later composes to the same target.
-        if let subsContainer {
-            let subsPath = (videoFolder as NSString).appendingPathComponent(subsContainer)
-            for sub in scanForSubtitles(directory: subsPath, includeSubfolders: false).sorted(by: { $0.filename < $1.filename }) {
-                let asset = Self.buildAsset(
-                    sourcePath: sub.path,
-                    sourceFilename: sub.filename,
-                    targetFolder: canonicalSubsFolder,
-                    newStem: newStem,
-                    originalContainer: subsContainer,
-                    allocator: &allocator
-                )
-                assets.append(asset)
-            }
-        }
-
-        // Sibling pass.
+        // Sibling pass runs first so that a subtitle sitting next to the
+        // video wins the un-suffixed primary name on collision — siblings
+        // are the strongest "user intent" signal (manually placed there
+        // to work with every player), so we prefer them over whatever
+        // came in the release's Subs/ folder.
         for entry in sortedEntries {
             let entryPath = (videoFolder as NSString).appendingPathComponent(entry)
             var isDir: ObjCBool = false
@@ -633,6 +620,23 @@ final class RenameModel {
                 allocator: &allocator
             )
             assets.append(asset)
+        }
+
+        // Subs/ container pass runs second — colliding entries fall back
+        // to `.2`, `.3`, … suffixes via the allocator.
+        if let subsContainer {
+            let subsPath = (videoFolder as NSString).appendingPathComponent(subsContainer)
+            for sub in scanForSubtitles(directory: subsPath, includeSubfolders: false).sorted(by: { $0.filename < $1.filename }) {
+                let asset = Self.buildAsset(
+                    sourcePath: sub.path,
+                    sourceFilename: sub.filename,
+                    targetFolder: canonicalSubsFolder,
+                    newStem: newStem,
+                    originalContainer: subsContainer,
+                    allocator: &allocator
+                )
+                assets.append(asset)
+            }
         }
 
         // Soft warning: an untagged sibling sub coexisting with a Subs/
