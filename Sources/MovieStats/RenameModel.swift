@@ -321,9 +321,22 @@ final class RenameModel {
             newRows[i].included = false
         }
 
-        // Sort: duplicates float highest (so the user sees the conflict
-        // immediately and the colliding rows land adjacent via newPath),
-        // then special-character rows, then alphabetical by current path.
+        // Sort priority (highest first):
+        //   1. Duplicate-target rows — two different source files matched
+        //      to the same TMDB id. Hard error that blocks Apply; user
+        //      must reconcile. Kept at the very top, ordered by newPath
+        //      so colliding pairs land adjacent.
+        //   2. Rows with a `.N` collision-suffixed subtitle — the
+        //      `UniqueTargetAllocator` handed out `.2`/`.3` because two
+        //      subs composed to the same name. Lossless on disk but the
+        //      user probably wants to rename `.en.2.srt` to something
+        //      like `.en.commentary.srt`, so float them up where they're
+        //      visible.
+        //   3. Rows whose source path contains filesystem-trouble
+        //      characters the sanitizer is rewriting.
+        //   4. Rows that have subtitles attached.
+        //   5. Rows without subtitles.
+        // Within each bucket: alphabetical by current display path.
         newRows.sort { a, b in
             if a.duplicateConflict != b.duplicateConflict {
                 return a.duplicateConflict && !b.duplicateConflict
@@ -331,9 +344,15 @@ final class RenameModel {
             if a.duplicateConflict, a.newPath != b.newPath {
                 return a.newPath.localizedStandardCompare(b.newPath) == .orderedAscending
             }
+            let aHasSuffix = a.subtitles.contains { $0.collisionSuffix }
+            let bHasSuffix = b.subtitles.contains { $0.collisionSuffix }
+            if aHasSuffix != bHasSuffix { return aHasSuffix && !bHasSuffix }
             if a.hasSpecialCharacters != b.hasSpecialCharacters {
                 return a.hasSpecialCharacters && !b.hasSpecialCharacters
             }
+            let aHasSubs = !a.subtitles.isEmpty
+            let bHasSubs = !b.subtitles.isEmpty
+            if aHasSubs != bHasSubs { return aHasSubs && !bHasSubs }
             return a.currentDisplay.localizedStandardCompare(b.currentDisplay) == .orderedAscending
         }
 
