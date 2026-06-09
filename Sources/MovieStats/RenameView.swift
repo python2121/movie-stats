@@ -54,6 +54,19 @@ struct RenameView: View {
             Task { await r.reload() }
         }
         .onExitCommand { if !embedded { dismiss() } }
+        // Belt-and-suspenders ESC handler. `.onExitCommand` works only
+        // when the surrounding view holds focus, but the SwiftUI Table
+        // grabs focus the moment it renders and swallows Escape before
+        // it propagates back up. A hidden button with
+        // `.keyboardShortcut(.cancelAction)` registers a window-wide
+        // shortcut that the Table can't intercept.
+        .background {
+            if !embedded {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
+            }
+        }
     }
 
     /// Centered spinner + progress shown while `reload()` is building the

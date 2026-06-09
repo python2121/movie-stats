@@ -81,7 +81,14 @@ final class DuplicatesModel {
 
     /// Scans `directory` for videos and rebuilds the grouped list. Prunes any
     /// checked rows that no longer exist so the selection stays valid.
-    func scan(directory: String) async {
+    ///
+    /// `includeRootLevel` controls whether videos sitting *directly* at the
+    /// scan root are bucketed (as a virtual group keyed by the root itself)
+    /// or skipped. The standalone library window leaves it off — multiple
+    /// loose top-level movies in a library root are different movies, not
+    /// duplicates. The import wizard turns it on because the source IS one
+    /// movie's folder, so loose top-level MKVs are extras to be pruned.
+    func scan(directory: String, includeRootLevel: Bool = false) async {
         guard !directory.isEmpty, !isScanning else { return }
 
         isScanning = true
@@ -92,7 +99,7 @@ final class DuplicatesModel {
         let extensions = DirectoryScanner.movieExtensions
         let groups = await Task.detached(priority: .userInitiated) {
             let found = FileScanner.scan(directory: URL(fileURLWithPath: root), extensions: extensions)
-            return Self.group(files: found, root: root)
+            return Self.group(files: found, root: root, includeRootLevel: includeRootLevel)
         }.value
 
         self.groups = groups
@@ -105,7 +112,7 @@ final class DuplicatesModel {
     ///
     /// Deletes are permanent (not sent to the Trash): this app targets network
     /// volumes, which generally don't support a Trash.
-    func cleanSelected(directory: String) async {
+    func cleanSelected(directory: String, includeRootLevel: Bool = false) async {
         let targets = groups.flatMap { $0.files }.filter { selection.contains($0.path) }
         guard !targets.isEmpty, !isDeleting else { return }
 
@@ -132,15 +139,23 @@ final class DuplicatesModel {
             lastError = "\(failures) of \(targets.count) file(s) could not be deleted."
         }
         selection.removeAll()
-        await scan(directory: directory)
+        await scan(directory: directory, includeRootLevel: includeRootLevel)
     }
 
     // MARK: - Grouping
 
     /// Buckets `files` by their first path component beneath `root`, keeping
-    /// only buckets with more than one video. Videos sitting directly in `root`
-    /// are ignored — only nested videos are considered.
-    nonisolated static func group(files: [ScannedFile], root: String) -> [DuplicateGroup] {
+    /// only buckets with more than one video. Videos sitting directly in
+    /// `root` are normally ignored — multiple loose top-level videos at a
+    /// library root are different movies, not duplicates. Turn on
+    /// `includeRootLevel` (used by the import wizard, where the scan root
+    /// IS one movie's folder) to bucket those too, under a synthetic group
+    /// keyed by the root itself.
+    nonisolated static func group(
+        files: [ScannedFile],
+        root: String,
+        includeRootLevel: Bool = false
+    ) -> [DuplicateGroup] {
         let rootURL = URL(fileURLWithPath: root).standardizedFileURL
         let rootComps = rootURL.pathComponents
 
@@ -151,10 +166,13 @@ final class DuplicatesModel {
             guard fileComps.count > rootComps.count else { continue }
             let relativeDirs = fileComps[rootComps.count..<(fileComps.count - 1)]
 
-            // Skip videos that live directly in the scan root.
-            guard let first = relativeDirs.first else { continue }
-            let groupURL = rootURL.appendingPathComponent(first)
-            buckets[groupURL.path, default: []].append(file)
+            if let first = relativeDirs.first {
+                let groupURL = rootURL.appendingPathComponent(first)
+                buckets[groupURL.path, default: []].append(file)
+            } else if includeRootLevel {
+                // Loose video at the scan root — bucket under the root.
+                buckets[rootURL.path, default: []].append(file)
+            }
         }
 
         return buckets

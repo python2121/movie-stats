@@ -1,7 +1,36 @@
+# macOS / Finder cruft
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager build output
 /.build/
 /Packages/
-*.xcodeproj
-/*.app
 .swiftpm/
+
+# Generated app bundle (produced by ./build-app.sh)
+/*.app
+
+# Xcode (we don't use a full Xcode project but defensive in case anyone opens one)
+*.xcodeproj
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+
+# Vendored / downloaded binaries — Resources/ffprobe is fetched on demand by
+# ./Tools/fetch-ffprobe.sh and bundled into the .app at build time, never
+# committed. AppIcon.icns / AppIcon.png are checked in (regenerable via
+# ./make-icon.sh but kept for clean clones).
 /Resources/ffprobe
+
+# Per-machine tooling state
+/.claude/
+
+# Editor swap / backup files
+*.swp
+*.swo
+*~
+
+# Misc transient
+*.log
+*.tmp

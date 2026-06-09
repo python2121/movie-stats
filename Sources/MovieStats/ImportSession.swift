@@ -39,6 +39,15 @@ final class ImportSession: MovieScope {
     /// Where we are in the wizard.
     var currentStep: Step = .pickDirectory
 
+    /// User-toggled at the ready step: if true, Move to Library deletes
+    /// the source directory after a successful move *only* when it's
+    /// left fully empty (ignoring hidden cruft like `.DS_Store`). The
+    /// canonical use is the single-movie case where the source folder
+    /// becomes an empty husk after its lone wrapper has been moved out.
+    /// Defaults to off because the deletion is permanent — files are
+    /// not sent to the Trash on the network volumes this app targets.
+    var autoPruneSource: Bool = false
+
     /// True while a long-running operation (scan, move) is in flight.
     private(set) var isBusy: Bool = false
     private(set) var busyMessage: String = ""
@@ -255,6 +264,21 @@ final class ImportSession: MovieScope {
 
         if !failures.isEmpty {
             lastError = failures.joined(separator: "\n")
+        }
+
+        // Auto-prune the source husk if requested. Triggers only when
+        // every visible (non-hidden) entry inside the source directory
+        // is gone — leftover NFOs / extras / unprocessed cruft leave
+        // the source alone for the user to deal with manually. We use
+        // `removeItem` rather than walking the tree so any hidden
+        // entries (`.DS_Store`, `.AppleDouble`, etc.) get cleaned up
+        // alongside the directory itself.
+        if autoPruneSource, !sourceDirectory.isEmpty {
+            let remaining = (try? fm.contentsOfDirectory(atPath: sourceDirectory)) ?? []
+            let visibleEntries = remaining.filter { !$0.hasPrefix(".") }
+            if visibleEntries.isEmpty {
+                try? fm.removeItem(atPath: sourceDirectory)
+            }
         }
 
         // Pick up the moved files in the live library, then re-apply

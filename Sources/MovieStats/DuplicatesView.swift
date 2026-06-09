@@ -10,6 +10,13 @@ struct DuplicatesView: View {
     let scopedDirectory: String?
     /// Drops window-style chrome (dismiss, fixed min-size) when true.
     let embedded: Bool
+    /// When true, videos sitting directly at the scan root are bucketed
+    /// into a synthetic group keyed by the root itself. Used by the
+    /// import wizard, whose scan root IS a single movie's folder — so
+    /// loose top-level MKVs (main movie + extras like
+    /// "The.Cast.Remembers.mkv") are exactly what the user wants to
+    /// see and prune from.
+    let includeRootLevel: Bool
 
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -17,9 +24,10 @@ struct DuplicatesView: View {
     @State private var model = DuplicatesModel()
     @State private var confirmingDelete = false
 
-    init(scopedDirectory: String? = nil, embedded: Bool = false) {
+    init(scopedDirectory: String? = nil, embedded: Bool = false, includeRootLevel: Bool = false) {
         self.scopedDirectory = scopedDirectory
         self.embedded = embedded
+        self.includeRootLevel = includeRootLevel
     }
 
     private var directory: String {
@@ -36,14 +44,14 @@ struct DuplicatesView: View {
         }
         .frame(minWidth: embedded ? nil : 600, minHeight: embedded ? nil : 460)
         .onExitCommand { if !embedded { dismiss() } }
-        .task { await model.scan(directory: directory) }
+        .task { await model.scan(directory: directory, includeRootLevel: includeRootLevel) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) file\(model.selection.count == 1 ? "" : "s")?",
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                Task { await model.cleanSelected(directory: directory) }
+                Task { await model.cleanSelected(directory: directory, includeRootLevel: includeRootLevel) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

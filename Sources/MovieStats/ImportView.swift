@@ -149,8 +149,12 @@ struct ImportView: View {
                 FileCleanupView(category: .text, scopedDirectory: session.sourceDirectory, embedded: true)
             }
         case .multiVideo:
-            embeddedSection(title: "Folders with multiple video files (samples, extras). Keep one; delete the rest.") {
-                DuplicatesView(scopedDirectory: session.sourceDirectory, embedded: true)
+            embeddedSection(title: "Folders with multiple video files (samples, extras). Keep one; delete the rest. Loose videos at the source root are included — the main movie + any extras sitting next to it both show up here.") {
+                DuplicatesView(
+                    scopedDirectory: session.sourceDirectory,
+                    embedded: true,
+                    includeRootLevel: true
+                )
             }
         case .emptyFolders:
             embeddedSection(title: "Folders left empty after the previous cleanups. Safe to delete.") {
@@ -249,6 +253,32 @@ struct ImportView: View {
             Text("Move to Library will rename every top-level item from the source into the library directory, then rescan the library and apply the TMDB matches you confirmed. Nothing in the library is overwritten — items already present at the destination are skipped.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Auto-prune toggle — opt-in because the deletion is
+            // permanent on network volumes (no Trash). The session's
+            // guard only fires when the source has no non-hidden
+            // entries left, but it's still worth shouting about.
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: Binding(
+                    get: { session.autoPruneSource },
+                    set: { session.autoPruneSource = $0 }
+                )) {
+                    Text("Delete the source directory afterwards if it's left empty")
+                }
+                .toggleStyle(.checkbox)
+
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Text("Permanent delete — files are not moved to Trash. Only triggers when the source has no non-hidden entries remaining (so leftover NFOs / extras / un-cleaned cruft are safe). Use this for the single-movie source case where the original folder becomes an empty husk after its renamed wrapper has been moved out.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 22)
+            }
+            .padding(.vertical, 4)
 
             if let error = session.lastError, !error.isEmpty {
                 Text(error)
