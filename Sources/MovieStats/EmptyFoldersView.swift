@@ -36,6 +36,13 @@ struct EmptyFoldersView: View {
         }
         .frame(minWidth: embedded ? nil : 600, minHeight: embedded ? nil : 460)
         .onExitCommand { if !embedded { dismiss() } }
+        .background {
+            if !embedded {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
+            }
+        }
         .task { await model.scan(directory: directory) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) folder\(model.selection.count == 1 ? "" : "s")?",

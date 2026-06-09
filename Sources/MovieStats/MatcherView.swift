@@ -61,6 +61,13 @@ struct MatcherView: View {
             )
         }
         .onExitCommand { if !embedded { dismiss() } }
+        .background {
+            if !embedded {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
+            }
+        }
     }
 
     @ViewBuilder

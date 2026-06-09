@@ -284,9 +284,46 @@ enum TMDBService {
         return first
     }
 
+    /// Extracts a `{tmdb-N}` tag embedded in a filesystem path — the
+    /// canonical format the renamer writes into every wrapper folder
+    /// and filename. Used by the matcher to bypass title-based search
+    /// entirely when the source path already carries an explicit ID
+    /// (much more reliable than the fuzzy lookup, and sidesteps the
+    /// diacritic quirk in TMDB's search backend).
+    ///
+    /// Returns nil if the path doesn't carry the tag. The match is
+    /// case-insensitive on the `tmdb` prefix to forgive odd variants.
+    static func tmdbID(fromPath path: String) -> Int? {
+        let pattern = #"\{[tT][mM][dD][bB]-(\d+)\}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(path.startIndex..., in: path)
+        guard let match = regex.firstMatch(in: path, range: range),
+              match.numberOfRanges >= 2,
+              let captured = Range(match.range(at: 1), in: path)
+        else { return nil }
+        return Int(path[captured])
+    }
+
     /// Full list of search results, ordered as TMDB returns them (relevance /
     /// popularity). Used by the matcher's "pick a different result" sheet.
+    ///
+    /// If the first query returns nothing and the title contains
+    /// diacritics, retries with the diacritics stripped. TMDB's search
+    /// backend is inconsistent here: a query like `Le Samouraï` returns
+    /// zero results, while `Le Samourai` matches the canonical
+    /// `Le Samouraï` record fine. The retry preserves the user's
+    /// original input as-is for titles where TMDB handles diacritics
+    /// correctly, and falls back transparently for the ones where it
+    /// doesn't.
     static func searchMovies(title: String, year: Int?) async throws -> [TMDBMovie] {
+        let results = try await rawSearch(title: title, year: year)
+        if !results.isEmpty { return results }
+        let stripped = title.folding(options: .diacriticInsensitive, locale: nil)
+        guard stripped != title else { return results }
+        return try await rawSearch(title: stripped, year: year)
+    }
+
+    private static func rawSearch(title: String, year: Int?) async throws -> [TMDBMovie] {
         guard let key = apiKey else { throw TMDBError.missingAPIKey }
 
         var components = URLComponents(string: "https://api.themoviedb.org/3/search/movie")!

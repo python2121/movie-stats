@@ -44,6 +44,18 @@ struct FileCleanupView: View {
         }
         .frame(minWidth: embedded ? nil : 560, minHeight: embedded ? nil : 420)
         .onExitCommand { if !embedded { dismiss() } }
+        // Belt-and-suspenders ESC handler — the SwiftUI `Table` widget
+        // grabs first-responder focus on render and can swallow Escape
+        // before `.onExitCommand` fires. A hidden button with
+        // `.keyboardShortcut(.cancelAction)` registers a window-wide
+        // shortcut the Table can't intercept.
+        .background {
+            if !embedded {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
+            }
+        }
         .task { await model.scan(directory: directory) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) \(category.noun)\(model.selection.count == 1 ? "" : "s")?",

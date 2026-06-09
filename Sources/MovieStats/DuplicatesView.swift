@@ -44,6 +44,13 @@ struct DuplicatesView: View {
         }
         .frame(minWidth: embedded ? nil : 600, minHeight: embedded ? nil : 460)
         .onExitCommand { if !embedded { dismiss() } }
+        .background {
+            if !embedded {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
+            }
+        }
         .task { await model.scan(directory: directory, includeRootLevel: includeRootLevel) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) file\(model.selection.count == 1 ? "" : "s")?",

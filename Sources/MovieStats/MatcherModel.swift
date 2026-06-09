@@ -198,6 +198,36 @@ final class MatcherModel {
             progress = total > 0 ? Double(index) / Double(total) : 0
 
             let row = rows[index]
+
+            // Fast path: if the source path already embeds a `{tmdb-N}`
+            // tag (from a prior rename, the import wizard, or any
+            // external tool that follows the convention), look up the
+            // movie by ID directly. That's unambiguous — bypasses the
+            // fuzzy title search entirely, which sidesteps both the
+            // diacritic quirk on TMDB's search endpoint and any
+            // year/title-parsing flakiness.
+            if let tmdbID = TMDBService.tmdbID(fromPath: row.path),
+               let detail = try? await TMDBService.details(forID: tmdbID) {
+                let candidate = TMDBMovie(
+                    id: detail.id,
+                    title: detail.title,
+                    originalTitle: detail.originalTitle,
+                    releaseDate: detail.releaseDate,
+                    overview: detail.overview,
+                    voteAverage: detail.voteAverage,
+                    voteCount: detail.voteCount,
+                    posterPath: detail.posterPath
+                )
+                rows[index].candidate = candidate
+                rows[index].preferredYear = detail.year
+                rows[index].status = .matched
+                rows[index].failureReason = nil
+                // An embedded TMDB id is an explicit user (or tool)
+                // signal — treat as auto-include, no review needed.
+                rows[index].included = true
+                continue
+            }
+
             let queryTitle = row.parsedTitle.isEmpty
                 ? row.displayTitle
                 : row.parsedTitle

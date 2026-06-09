@@ -28,6 +28,11 @@ struct IMDbView: View {
             }
         }
         .onExitCommand { dismiss() }
+        .background {
+            Button("Close") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+                .hidden()
+        }
     }
 
     // MARK: - Subviews
