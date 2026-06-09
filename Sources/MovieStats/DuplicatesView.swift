@@ -5,11 +5,26 @@ import SwiftUI
 /// subfolders) so it's clear which belong together. Checked videos can be
 /// permanently deleted.
 struct DuplicatesView: View {
+    /// Optional directory override (for embedded use by the import
+    /// wizard). When nil, falls back to the live `directory`.
+    let scopedDirectory: String?
+    /// Drops window-style chrome (dismiss, fixed min-size) when true.
+    let embedded: Bool
+
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     @State private var model = DuplicatesModel()
     @State private var confirmingDelete = false
+
+    init(scopedDirectory: String? = nil, embedded: Bool = false) {
+        self.scopedDirectory = scopedDirectory
+        self.embedded = embedded
+    }
+
+    private var directory: String {
+        scopedDirectory ?? app.directoryPath
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,16 +34,16 @@ struct DuplicatesView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 600, minHeight: 460)
-        .onExitCommand { dismiss() }
-        .task { await model.scan(directory: app.directoryPath) }
+        .frame(minWidth: embedded ? nil : 600, minHeight: embedded ? nil : 460)
+        .onExitCommand { if !embedded { dismiss() } }
+        .task { await model.scan(directory: directory) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) file\(model.selection.count == 1 ? "" : "s")?",
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                Task { await model.cleanSelected(directory: app.directoryPath) }
+                Task { await model.cleanSelected(directory: directory) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -43,7 +58,7 @@ struct DuplicatesView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Multiple Videos per Folder")
                     .font(.headline)
-                Text("\(model.groups.count) folder\(model.groups.count == 1 ? "" : "s") with more than one video in \(app.directoryPath)")
+                Text("\(model.groups.count) folder\(model.groups.count == 1 ? "" : "s") with more than one video in \(directory)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

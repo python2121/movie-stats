@@ -6,6 +6,15 @@ import SwiftUI
 /// files and refreshes the list. Used for both the Images and Text/NFO windows.
 struct FileCleanupView: View {
     let category: CleanupCategory
+    /// Optional directory override. When non-nil, the view scans this
+    /// directory instead of the live `directory` — used by the
+    /// import wizard to point the cleanup at a /complete-style source
+    /// without disturbing the main library.
+    let scopedDirectory: String?
+    /// When true the window-style trim chrome (toolbar dismiss handler,
+    /// fixed min-size) is dropped so the view can be embedded inside
+    /// another container like the import wizard.
+    let embedded: Bool
 
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -13,9 +22,16 @@ struct FileCleanupView: View {
     @State private var model: FileCleanupModel
     @State private var confirmingDelete = false
 
-    init(category: CleanupCategory) {
+    init(category: CleanupCategory, scopedDirectory: String? = nil, embedded: Bool = false) {
         self.category = category
+        self.scopedDirectory = scopedDirectory
+        self.embedded = embedded
         _model = State(initialValue: FileCleanupModel(category: category))
+    }
+
+    /// Effective directory the cleanup operates on.
+    private var directory: String {
+        scopedDirectory ?? app.directoryPath
     }
 
     var body: some View {
@@ -26,16 +42,16 @@ struct FileCleanupView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 560, minHeight: 420)
-        .onExitCommand { dismiss() }
-        .task { await model.scan(directory: app.directoryPath) }
+        .frame(minWidth: embedded ? nil : 560, minHeight: embedded ? nil : 420)
+        .onExitCommand { if !embedded { dismiss() } }
+        .task { await model.scan(directory: directory) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) \(category.noun)\(model.selection.count == 1 ? "" : "s")?",
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                Task { await model.cleanSelected(directory: app.directoryPath) }
+                Task { await model.cleanSelected(directory: directory) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -50,7 +66,7 @@ struct FileCleanupView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(category.title)
                     .font(.headline)
-                Text("\(model.files.count) \(category.noun)\(model.files.count == 1 ? "" : "s") in \(app.directoryPath)")
+                Text("\(model.files.count) \(category.noun)\(model.files.count == 1 ? "" : "s") in \(directory)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

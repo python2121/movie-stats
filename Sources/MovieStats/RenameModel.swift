@@ -129,10 +129,10 @@ final class RenameModel {
     private(set) var currentPath: String?
     var lastError: String?
 
-    private let appModel: AppModel
+    private let scope: any MovieScope
 
-    init(appModel: AppModel) {
-        self.appModel = appModel
+    init(scope: any MovieScope) {
+        self.scope = scope
     }
 
     // MARK: - Derived
@@ -154,24 +154,24 @@ final class RenameModel {
     /// responsive — driving the loading spinner + progress bar.
     func reload() async {
         guard !isLoading else { return }
-        guard let store = appModel.store else {
+        guard let store = scope.store else {
             rows = []
             return
         }
         isLoading = true
         progress = 0
         loadProcessed = 0
-        loadTotal = appModel.movies.count
+        loadTotal = scope.movies.count
         defer {
             isLoading = false
             progress = 0
         }
-        let scanRoot = appModel.directoryPath
+        let scanRoot = scope.directoryPath
 
         // Count siblings per parent directory so we can skip multi-video
         // folders (renaming the shared folder would break the other movies).
         var siblingCounts: [String: Int] = [:]
-        for movie in appModel.movies {
+        for movie in scope.movies {
             let parent = (movie.path as NSString).deletingLastPathComponent
             siblingCounts[parent, default: 0] += 1
         }
@@ -186,7 +186,7 @@ final class RenameModel {
         // by filename-stem prefix without rescanning the root per row.
         let rootSubtitleIndex = Self.scanForSubtitles(directory: scanRoot, includeSubfolders: false)
 
-        for (movieIdx, movie) in appModel.movies.enumerated() {
+        for (movieIdx, movie) in scope.movies.enumerated() {
             // Yield every 5 movies so the UI gets a chance to repaint the
             // progress indicator. The per-movie work below is mostly file
             // system I/O on a network volume, which can be slow enough
@@ -364,7 +364,7 @@ final class RenameModel {
     /// update happens in sequence so a single failure doesn't poison the
     /// rest of the list.
     func apply() async {
-        guard !isApplying, let store = appModel.store else { return }
+        guard !isApplying, scope.store != nil else { return }
         let work = rows.enumerated().compactMap { (i, r) -> (Int, Row)? in
             r.included ? (i, r) : nil
         }
@@ -425,7 +425,7 @@ final class RenameModel {
                     }
                 }
 
-                try store.updatePath(
+                try scope.updatePath(
                     oldPath: row.path,
                     newPath: row.newPath,
                     newFilename: row.newFilename
@@ -449,7 +449,7 @@ final class RenameModel {
 
         // Pull the rekeyed paths back into the AppModel so the main window
         // shows the new on-disk locations.
-        appModel.reloadFromStore()
+        scope.reloadFromStore()
     }
 
     enum RenameError: LocalizedError {
@@ -561,7 +561,8 @@ final class RenameModel {
     /// Where the subtitle file *currently* is on disk, given the video's
     /// wrapper folder has already moved (and possibly its Subs subfolder
     /// has been canonicalized). The stored `subtitle.path` was captured at
-    /// reload time and is now stale.
+    /// reload time and is now stale for any sub that travelled with the
+    /// wrapper.
     private func currentSubtitlePath(for subtitle: SubtitleAsset, row: Row) -> String {
         let originalFilename = (subtitle.path as NSString).lastPathComponent
         let container = subtitle.originalContainer.map { name in
@@ -574,7 +575,21 @@ final class RenameModel {
             let folder = (row.newFolderPath as NSString).appendingPathComponent(container)
             return (folder as NSString).appendingPathComponent(originalFilename)
         }
-        return (row.newFolderPath as NSString).appendingPathComponent(originalFilename)
+        // Sibling subtitle case. For `.renameFolder` the entire wrapper
+        // folder was renamed in step 1, carrying the sibling along, so
+        // it now lives at `<newFolderPath>/<originalFilename>`. For
+        // `.createFolderAndMove` only the *video* was moved into the
+        // freshly-created wrapper — the sibling was never picked up
+        // because it sits in the same directory we created the wrapper
+        // inside (e.g. the scan root for a loose top-level video, or
+        // the source directory in the import wizard). Use its captured
+        // original path in that case so the move can actually find it.
+        switch row.plan {
+        case .renameFolder:
+            return (row.newFolderPath as NSString).appendingPathComponent(originalFilename)
+        case .createFolderAndMove:
+            return subtitle.path
+        }
     }
 
     // MARK: - Subtitle plan helpers

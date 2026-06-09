@@ -66,6 +66,12 @@ struct MovieStatsApp: App {
         }
         .windowResizability(.contentMinSize)
 
+        Window("Import", id: "import") {
+            ImportView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
+
         Window("IMDb Ratings", id: "imdb-ratings") {
             IMDbView()
                 .environment(model)

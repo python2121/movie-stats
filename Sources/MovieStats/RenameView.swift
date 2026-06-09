@@ -5,11 +5,24 @@ import SwiftUI
 /// path, and include checkbox. Special-character rows float to the top.
 /// Apply runs serially with a live "currently renaming" status.
 struct RenameView: View {
+    /// Optional scope override. When set, the rename model is built
+    /// against this scope (e.g. an `ImportSession`) instead of the
+    /// live `appModel`. Set by the import wizard.
+    let scopedScope: (any MovieScope)?
+    /// Drops window-style chrome when embedded inside another
+    /// container.
+    let embedded: Bool
+
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var renamer: RenameModel?
     @State private var confirmingApply = false
+
+    init(scopedScope: (any MovieScope)? = nil, embedded: Bool = false) {
+        self.scopedScope = scopedScope
+        self.embedded = embedded
+    }
 
     /// Width of the right-hand checkbox column. Same value used by the
     /// header cell and each row to keep things aligned.
@@ -29,10 +42,10 @@ struct RenameView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 880, minHeight: 540)
+        .frame(minWidth: embedded ? nil : 880, minHeight: embedded ? nil : 540)
         .onAppear {
             if renamer == nil {
-                renamer = RenameModel(appModel: appModel)
+                renamer = RenameModel(scope: scopedScope ?? appModel)
             }
             guard let r = renamer, !r.isApplying, !r.isLoading else { return }
             // Dispatch reload as a Task so the per-row directory
@@ -40,7 +53,7 @@ struct RenameView: View {
             // spinner can paint in the meantime.
             Task { await r.reload() }
         }
-        .onExitCommand { dismiss() }
+        .onExitCommand { if !embedded { dismiss() } }
     }
 
     /// Centered spinner + progress shown while `reload()` is building the

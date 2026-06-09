@@ -145,17 +145,17 @@ final class MatcherModel {
     /// True iff TMDB lookups are even possible right now.
     var hasAPIKey: Bool { TMDBService.apiKey != nil }
 
-    private let appModel: AppModel
+    private let scope: any MovieScope
     private var scanTask: Task<Void, Never>?
 
-    init(appModel: AppModel) {
-        self.appModel = appModel
+    init(scope: any MovieScope) {
+        self.scope = scope
     }
 
-    /// Rebuilds `rows` from the AppModel's current unmatched movies. Call
+    /// Rebuilds `rows` from the scope's current unmatched movies. Call
     /// each time the window is opened so we pick up newly-scanned files.
     func reload() {
-        rows = appModel.movies
+        rows = scope.movies
             .filter { $0.tmdbId == nil }
             .sorted { $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending }
             .map { movie in
@@ -333,13 +333,13 @@ final class MatcherModel {
                 let detail: TMDBMovieDetail
                 if let cached = detailCache[tmdbID] {
                     detail = cached
-                } else if let existing = try? appModel.store?.tmdbDetail(forID: tmdbID) {
+                } else if let existing = try? scope.store?.tmdbDetail(forID: tmdbID) {
                     // Already have this TMDB row from a previous confirm.
                     detail = existing
                     detailCache[tmdbID] = existing
                 } else {
                     detail = try await TMDBService.details(forID: tmdbID)
-                    try appModel.store?.upsertTMDBDetail(detail)
+                    try scope.store?.upsertTMDBDetail(detail)
                     detailCache[tmdbID] = detail
                 }
 
@@ -357,7 +357,7 @@ final class MatcherModel {
                 let row = rows.first(where: { $0.path == entry.path })
                 let yearString = row?.preferredYear ?? entry.candidate.year
                 let confirmedYear = yearString.flatMap(Int.init)
-                try appModel.store?.setTMDBMatch(
+                try scope.setTMDBMatch(
                     forPath: entry.path,
                     tmdbID: tmdbID,
                     confirmedYear: confirmedYear
@@ -380,6 +380,6 @@ final class MatcherModel {
 
         // Pull the freshly-tagged rows back into the AppModel so the main
         // library checkmark column updates immediately.
-        appModel.reloadFromStore()
+        scope.reloadFromStore()
     }
 }

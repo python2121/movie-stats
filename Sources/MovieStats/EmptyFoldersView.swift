@@ -4,11 +4,27 @@ import SwiftUI
 /// folders can be permanently deleted (along with any empty subfolders or
 /// hidden cruft inside them).
 struct EmptyFoldersView: View {
+    /// Optional directory override for embedded use (e.g. the import
+    /// wizard). When nil, falls back to the live `directory`.
+    let scopedDirectory: String?
+    /// When true, drops the window-style chrome (dismiss hook, fixed
+    /// min-size) so the view can be embedded inside another container.
+    let embedded: Bool
+
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
     @State private var model = EmptyFoldersModel()
     @State private var confirmingDelete = false
+
+    init(scopedDirectory: String? = nil, embedded: Bool = false) {
+        self.scopedDirectory = scopedDirectory
+        self.embedded = embedded
+    }
+
+    private var directory: String {
+        scopedDirectory ?? app.directoryPath
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,16 +34,16 @@ struct EmptyFoldersView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 600, minHeight: 460)
-        .onExitCommand { dismiss() }
-        .task { await model.scan(directory: app.directoryPath) }
+        .frame(minWidth: embedded ? nil : 600, minHeight: embedded ? nil : 460)
+        .onExitCommand { if !embedded { dismiss() } }
+        .task { await model.scan(directory: directory) }
         .confirmationDialog(
             "Permanently delete \(model.selection.count) folder\(model.selection.count == 1 ? "" : "s")?",
             isPresented: $confirmingDelete,
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                Task { await model.cleanSelected(directory: app.directoryPath) }
+                Task { await model.cleanSelected(directory: directory) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -42,7 +58,7 @@ struct EmptyFoldersView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Empty Folders")
                     .font(.headline)
-                Text("\(model.folders.count) empty folder\(model.folders.count == 1 ? "" : "s") in \(app.directoryPath)")
+                Text("\(model.folders.count) empty folder\(model.folders.count == 1 ? "" : "s") in \(directory)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

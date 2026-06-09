@@ -4,11 +4,24 @@ import SwiftUI
 /// TMDB auto-match result on the right (clickable to override), Scan +
 /// Confirm at the bottom.
 struct MatcherView: View {
+    /// Optional scope override. When set, the matcher is constructed
+    /// against this scope (e.g. an `ImportSession`) instead of the
+    /// live `appModel`. Set by the import wizard.
+    let scopedScope: (any MovieScope)?
+    /// Drops window-style chrome (dismiss hook, fixed min-size) when
+    /// true — for embedding inside another container.
+    let embedded: Bool
+
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
 
     @State private var matcher: MatcherModel?
     @State private var editingRow: MatcherModel.Row?
+
+    init(scopedScope: (any MovieScope)? = nil, embedded: Bool = false) {
+        self.scopedScope = scopedScope
+        self.embedded = embedded
+    }
 
     /// Width of the right-hand include checkbox column. Same value used by
     /// both the header cell and each row's checkbox so they stay aligned.
@@ -24,10 +37,10 @@ struct MatcherView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 760, minHeight: 480)
+        .frame(minWidth: embedded ? nil : 760, minHeight: embedded ? nil : 480)
         .onAppear {
             if matcher == nil {
-                matcher = MatcherModel(appModel: appModel)
+                matcher = MatcherModel(scope: scopedScope ?? appModel)
             }
             // Re-parse the file-title list from the AppModel every time the
             // window appears so a fresh rescan picks up renames / new files
@@ -47,7 +60,7 @@ struct MatcherView: View {
                 onCancel: { editingRow = nil }
             )
         }
-        .onExitCommand { dismiss() }
+        .onExitCommand { if !embedded { dismiss() } }
     }
 
     @ViewBuilder

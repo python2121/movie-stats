@@ -566,6 +566,13 @@ struct ContentView: View {
             Spacer()
 
             Button {
+                openWindow(id: "import")
+            } label: {
+                Label("Import", systemImage: "tray.and.arrow.down")
+            }
+            .help("Walk a /complete-style folder through TMDB matching, cleanup, rename, and move into the library")
+
+            Button {
                 openWindow(id: CleanupCategory.images.id)
             } label: {
                 Label("Scan Images", systemImage: "photo.on.rectangle")
