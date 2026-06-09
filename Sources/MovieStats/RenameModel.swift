@@ -633,8 +633,6 @@ final class RenameModel {
             subsContainer = entry
             break
         }
-        let consolidateSiblings = subsContainer != nil
-
         let canonicalSubsFolder = (newFolder as NSString)
             .appendingPathComponent(SubtitleClassifier.canonicalFolderName)
 
@@ -645,6 +643,12 @@ final class RenameModel {
         // are the strongest "user intent" signal (manually placed there
         // to work with every player), so we prefer them over whatever
         // came in the release's Subs/ folder.
+        //
+        // Every subtitle — sibling or Subs-folder entry — lands inside
+        // the canonical `Subs/` subfolder of the new wrapper. We don't
+        // preserve the source layout's "next to the video" placement
+        // because keeping the canonical Plex/Jellyfin convention uniform
+        // makes the resulting library more predictable.
         for entry in sortedEntries {
             let entryPath = (videoFolder as NSString).appendingPathComponent(entry)
             var isDir: ObjCBool = false
@@ -652,11 +656,10 @@ final class RenameModel {
                   !isDir.boolValue else { continue }
             let ext = (entry as NSString).pathExtension
             guard SubtitleClassifier.isSubtitleExtension(ext) else { continue }
-            let parentFolder = consolidateSiblings ? canonicalSubsFolder : newFolder
             let asset = Self.buildAsset(
                 sourcePath: entryPath,
                 sourceFilename: entry,
-                targetFolder: parentFolder,
+                targetFolder: canonicalSubsFolder,
                 newStem: newStem,
                 originalContainer: nil,
                 allocator: &allocator
@@ -784,6 +787,12 @@ final class RenameModel {
         let separators: Set<Character> = [".", "-", "_", " "]
         var assets: [SubtitleAsset] = []
         var allocator = UniqueTargetAllocator()
+        // Loose siblings at the scan root go into `Subs/` inside the new
+        // wrapper, same convention as foldered videos. The applySubtitles
+        // safety net creates the `Subs/` folder on demand if it doesn't
+        // already exist.
+        let canonicalSubsFolder = (newFolder as NSString)
+            .appendingPathComponent(SubtitleClassifier.canonicalFolderName)
         // Sorted so collision-suffix numbering is deterministic.
         let sorted = candidates.sorted(by: { $0.filename < $1.filename })
         for candidate in sorted {
@@ -800,7 +809,7 @@ final class RenameModel {
             let asset = Self.buildAsset(
                 sourcePath: candidate.path,
                 sourceFilename: candidate.filename,
-                targetFolder: newFolder,
+                targetFolder: canonicalSubsFolder,
                 newStem: newStem,
                 originalContainer: nil,
                 allocator: &allocator

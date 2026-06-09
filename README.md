@@ -127,8 +127,8 @@ canonical Plex/Jellyfin form:
 ```
 Movie Title (Year) {tmdb-12345}/
     Movie Title (Year) {tmdb-12345}.mkv
-    Movie Title (Year) {tmdb-12345}.en.srt          ← sibling subtitle
     Subs/
+        Movie Title (Year) {tmdb-12345}.en.srt
         Movie Title (Year) {tmdb-12345}.de.srt
         Movie Title (Year) {tmdb-12345}.ja.srt
         Movie Title (Year) {tmdb-12345}.zh.simplified.srt
@@ -145,8 +145,11 @@ Highlights:
 - **Remux preservation** — if the original path or filename contained
   "Remux", the canonical filename ends with `[Remux]`.
 - **Subtitle handling** — recognizes `.srt`, `.ass`, `.ssa`, `.sub`,
-  `.idx`, `.vtt`, `.sup`, `.smi`. Canonicalizes any `subs/` / `subtitles/` /
-  `subz/` folder to `Subs/`. Detects language tokens from filenames in 50+
+  `.idx`, `.vtt`, `.sup`, `.smi`. *Every* subtitle is renamed into the
+  wrapper's `Subs/` subfolder regardless of source layout (siblings next
+  to the video, contents of any `subs/` / `subtitles/` / `subz/` folder,
+  loose siblings at the scan root for a top-level video — all get
+  promoted to `Subs/`). Detects language tokens from filenames in 50+
   languages and 3-letter ISO codes. Detects descriptors like `commentary`,
   `director`, `simplified` / `traditional` (Chinese), `brazilian` /
   `latin` / `european` / `british` / `canadian` so two same-language

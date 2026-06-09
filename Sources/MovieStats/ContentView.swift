@@ -703,36 +703,56 @@ private struct MovieDetailSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 8) {
-                        detailRow("Type", movie.movieType ?? "—")
-                        detailRow("Size", ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file))
-                        detailRow("Resolution", resolutionText)
-                        detailRow("Duration", durationText)
-                        detailRow("Bitrate", bitrateText)
-                        detailRow("Video Codec", (movie.videoCodec ?? "—").uppercased())
-                        detailRow("Container", movie.container ?? "—")
-                        detailRow("Pixel Format", movie.pixFmt ?? "—")
-                        detailRow("Bit Depth", movie.is10Bit ? "10-bit" : "8-bit")
-                        detailRow("HDR", movie.hdrFormat ?? "—")
-                        detailRow("Dolby Vision", movie.hasDolbyVision ? "Yes" : "No")
-                        detailRow("Video Tracks", String(movie.videoTracks))
-                        detailRow("Audio Tracks", String(movie.audioTracks))
-                        detailRow("Subtitle Tracks", String(movie.subtitleTracks))
-                        detailRow("Last Scanned", dateText(movie.dateScanned))
-                        detailRow("Last Probed", movie.probedAt.map(dateText) ?? "—")
+                    // File-info grid (left) + TMDB details (right), side by
+                    // side at the top so the right-hand whitespace of the
+                    // popup carries useful content instead of going empty.
+                    // Audio + subtitle track tables stay full-width below.
+                    HStack(alignment: .top, spacing: 20) {
+                        Grid(alignment: .topLeading, horizontalSpacing: 18, verticalSpacing: 8) {
+                            detailRow("Type", movie.movieType ?? "—")
+                            detailRow("Size", ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file))
+                            detailRow("Resolution", resolutionText)
+                            detailRow("Duration", durationText)
+                            detailRow("Bitrate", bitrateText)
+                            detailRow("Video Codec", (movie.videoCodec ?? "—").uppercased())
+                            detailRow("Container", movie.container ?? "—")
+                            detailRow("Pixel Format", movie.pixFmt ?? "—")
+                            detailRow("Bit Depth", movie.is10Bit ? "10-bit" : "8-bit")
+                            detailRow("HDR", movie.hdrFormat ?? "—")
+                            detailRow("Dolby Vision", movie.hasDolbyVision ? "Yes" : "No")
+                            detailRow("Video Tracks", String(movie.videoTracks))
+                            detailRow("Audio Tracks", String(movie.audioTracks))
+                            detailRow("Subtitle Tracks", String(movie.subtitleTracks))
+                            detailRow("Last Scanned", dateText(movie.dateScanned))
+                            detailRow("Last Probed", movie.probedAt.map(dateText) ?? "—")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                        Divider()
+
+                        tmdbSection
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
 
-                    if !movie.audioCodecs.isEmpty {
+                    // Audio + subtitle tracks side by side. When only one
+                    // side has data, drop the divider and let it take the
+                    // full width on its own.
+                    if !movie.audioCodecs.isEmpty || !movie.subtitleCodecs.isEmpty {
                         Divider()
-                        audioTracksTable
+                        HStack(alignment: .top, spacing: 20) {
+                            if !movie.audioCodecs.isEmpty {
+                                audioTracksTable
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            }
+                            if !movie.audioCodecs.isEmpty && !movie.subtitleCodecs.isEmpty {
+                                Divider()
+                            }
+                            if !movie.subtitleCodecs.isEmpty {
+                                subtitleTracksTable
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            }
+                        }
                     }
-                    if !movie.subtitleCodecs.isEmpty {
-                        Divider()
-                        subtitleTracksTable
-                    }
-
-                    Divider()
-                    tmdbSection
                 }
                 .padding(.vertical, 14)
             }

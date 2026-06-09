@@ -315,11 +315,20 @@ to the same new stem keeps the link intact.
 `sdhTags` for the no-separator case. `hi` is intentionally *not* an SDH tag
 because it's also the ISO 639-1 code for Hindi.
 
-**Subs-folder canonicalization:** any of `subs/`, `subtitles/`, `subtitle/`,
-`sub/`, `subz/`, `s/` gets renamed to `Subs/` during apply. If a wrapper
-folder has both a Subs-style folder AND sibling subs at the video level,
-the siblings get consolidated *into* `Subs/`. Both layouts are tolerated;
-the consolidation only happens when both exist.
+**Subs/ promotion is universal.** Every subtitle — sibling next to the
+video, entry inside an existing `subs/` / `subtitles/` / `subtitle/` /
+`sub/` / `subz/` / `s/` folder, or sibling at the scan root for a loose
+top-level video — gets renamed *into* the canonical `Subs/` subfolder
+of the wrapper. The applySubtitles safety net creates `Subs/` on demand
+when no source layout already had one. Both the standalone Rename Library
+and the import wizard use the same path. The folder name `Subs` (capital
+S) is a chosen convention, not a Plex/Jellyfin spec — both platforms are
+case-insensitive when scanning subtitle folders. Capital matches dominant
+release-group convention; one-line change in
+`SubtitleClassifier.canonicalFolderName` if a future maintainer wants
+lowercase. The `subtitleFolderAliases` set drives the *input* recognition
+side (any case of any alias is accepted), so source layouts in any form
+get collapsed to the single canonical output.
 
 ### 6.4 The rename plan: two shapes
 
