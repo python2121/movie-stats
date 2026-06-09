@@ -739,12 +739,20 @@ final class RenameModel {
     ) -> SubtitleAsset {
         let parsed = SubtitleClassifier.parse(filename: sourceFilename)
         let ext = (sourceFilename as NSString).pathExtension
+        // Pre-existing `.N` collision suffix (from a prior rename pass)
+        // is preserved through compose. Without this the planner would
+        // see `<base>.en.srt` and `<base>.en.2.srt` as both targeting
+        // `<base>.en.srt`, then alphabetical ordering ("2" < "s") would
+        // make the `.2` file win the unsuffixed slot — the two files
+        // swap on every apply.
+        let preservedSuffix = SubtitleClassifier.extractNumericSuffix(filename: sourceFilename)
         let composedName = SubtitleClassifier.compose(
             base: newStem,
             lang: parsed.lang,
             forced: parsed.forced,
             sdh: parsed.sdh,
             descriptor: parsed.descriptor,
+            numericSuffix: preservedSuffix,
             ext: ext
         )
         let proposed = (targetFolder as NSString).appendingPathComponent(composedName)

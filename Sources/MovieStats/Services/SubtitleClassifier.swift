@@ -86,6 +86,7 @@ enum SubtitleClassifier {
         forced: Bool,
         sdh: Bool,
         descriptor: String?,
+        numericSuffix: Int? = nil,
         ext: String
     ) -> String {
         var name = base
@@ -93,7 +94,31 @@ enum SubtitleClassifier {
         if let descriptor { name += ".\(descriptor)" }
         if sdh { name += ".sdh" }
         if forced { name += ".forced" }
+        // Stable collision-disambiguation suffix (`.2`, `.3`, …). When
+        // a previous rename pass handed out `<base>.en.2.srt`, that
+        // suffix is now part of the file's canonical identity — we
+        // re-emit it on subsequent passes so the file isn't seen as
+        // colliding with the un-suffixed `<base>.en.srt` and swapped.
+        if let numericSuffix { name += ".\(numericSuffix)" }
         return ext.isEmpty ? name : "\(name).\(ext)"
+    }
+
+    /// Extracts a trailing `.N` (where N >= 2) collision-disambiguation
+    /// suffix from a filename. Returns nil if there isn't one. Used by
+    /// the renamer to preserve suffixes a previous rename pass already
+    /// emitted into the filenames, so opening the rename window twice
+    /// in a row doesn't flip-flop the suffix between two files.
+    ///
+    /// Heuristic: the last dot-segment of the *stem* (filename minus
+    /// extension) must be purely numeric and ≥ 2. `.1` isn't recognized
+    /// because the allocator never hands it out (it starts at .2).
+    static func extractNumericSuffix(filename: String) -> Int? {
+        let stem = (filename as NSString).deletingPathExtension
+        guard let dotIdx = stem.lastIndex(of: ".") else { return nil }
+        let tail = stem[stem.index(after: dotIdx)...]
+        guard !tail.isEmpty, tail.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        guard let n = Int(tail), n >= 2 else { return nil }
+        return n
     }
 
     // MARK: - Lookup tables
