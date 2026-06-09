@@ -362,6 +362,28 @@ the Rename window a second time after Apply doesn't show 500 rows of
 "nothing to do." Defined in the no-op filter at the bottom of
 `RenameModel.reload()`.
 
+### 6.6.1 The Multiple Videos finder: library scope vs import scope
+
+`DuplicatesModel.group` buckets videos by their first path component
+beneath the scan root. By default it **skips videos sitting directly at
+the scan root** — in the standalone library window that's the right call
+(loose top-level movies in `/movies/` are independent movies, not
+duplicates of each other).
+
+The import wizard passes `includeRootLevel: true` through both
+`scan` and `group` because its scan root IS one movie's folder — so the
+main MKV + any extras at the same level (`Movie.MKV` +
+`Movie.Extras.The.Cast.Remembers.mkv` etc.) ARE the duplicates to prune.
+Those land in a synthetic group keyed by the scan root itself, named
+after the source folder. The per-group "select all but the largest"
+shortcut works correctly here: it spares the main movie (largest) and
+checks every extra.
+
+Subfolder-nested videos still form their own buckets keyed by the
+subfolder, so a release with both top-level extras and a nested
+`Extras/` subfolder will show up as two separate groups in the same
+wizard step.
+
 ### 6.7 The import wizard's source-dir cases
 
 - **Parent-dir source** (`/complete/` containing release folders): each
