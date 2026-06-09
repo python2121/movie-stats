@@ -190,11 +190,17 @@ final class ImportSession: MovieScope {
 
     // MARK: - Step 7: Move to Library
 
-    /// Final action. For each *top-level* item in the source directory
-    /// (typically a renamed wrapper folder like
-    /// `<title> (<year>) {tmdb-N}` after the rename step), moves the
-    /// item into the live library directory, then triggers a rescan +
-    /// re-applies the TMDB matches for the moved files.
+    /// Final action. Moves *only the items this import is responsible for*
+    /// into the live library directory, then triggers a rescan + re-applies
+    /// the TMDB matches for the moved files.
+    ///
+    /// "Items this import is responsible for" = each in-memory movie's
+    /// first path component beneath `sourceDirectory`. After the rename
+    /// step that's typically a canonical wrapper folder like
+    /// `<title> (<year>) {tmdb-N}`. Anything else in the source —
+    /// manually-organized extras subfolders, leftover NFOs, `.DS_Store`,
+    /// release artwork — gets left where it is. We never touched it, so
+    /// we don't move it.
     ///
     /// Safe to call multiple times — items already in the library are
     /// skipped. Bails early with `lastError` set if the library
@@ -221,20 +227,35 @@ final class ImportSession: MovieScope {
         }
 
         let fm = FileManager.default
-        let topLevelItems: [String]
-        do {
-            topLevelItems = try fm.contentsOfDirectory(atPath: sourceDirectory).sorted()
-        } catch {
-            lastError = "Couldn't read source directory: \(error.localizedDescription)"
+        // Compute the in-scope top-level items: each tracked movie's first
+        // path component beneath the source. Using a Set so two videos
+        // sharing a wrapper folder don't produce two move attempts.
+        let sourcePrefix = sourceDirectory.hasSuffix("/") ? sourceDirectory : sourceDirectory + "/"
+        let itemsToMove: Set<String> = Set(
+            movies.compactMap { movie -> String? in
+                guard movie.path.hasPrefix(sourcePrefix) else { return nil }
+                let relative = String(movie.path.dropFirst(sourcePrefix.count))
+                if let slash = relative.firstIndex(of: "/") {
+                    return String(relative[..<slash])
+                }
+                // Loose file directly at the source root — move just the
+                // file. Sidecars only travel along if the user ran the
+                // rename step, which gathers them into a wrapper folder.
+                return relative
+            }
+        )
+        guard !itemsToMove.isEmpty else {
+            lastError = "No imported items to move — nothing in this session has a path inside \(sourceDirectory)."
             return
         }
+        let sortedItems = itemsToMove.sorted()
 
         // Track success: post-move path of each in-memory movie so we
         // can re-apply TMDB matches after the rescan.
         var rekeyedMatches: [String: (tmdbID: Int, confirmedYear: Int?)] = [:]
         var failures: [String] = []
 
-        for item in topLevelItems {
+        for item in sortedItems {
             let src = (sourceDirectory as NSString).appendingPathComponent(item)
             let dst = (destination as NSString).appendingPathComponent(item)
             if fm.fileExists(atPath: dst) {

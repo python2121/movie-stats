@@ -364,25 +364,73 @@ the Rename window a second time after Apply doesn't show 500 rows of
 
 ### 6.6.1 The Multiple Videos finder: library scope vs import scope
 
-`DuplicatesModel.group` buckets videos by their first path component
-beneath the scan root. By default it **skips videos sitting directly at
-the scan root** — in the standalone library window that's the right call
-(loose top-level movies in `/movies/` are independent movies, not
-duplicates of each other).
+`DuplicatesModel.group` has two behaviors keyed on the
+`includeRootLevel` flag.
 
-The import wizard passes `includeRootLevel: true` through both
-`scan` and `group` because its scan root IS one movie's folder — so the
-main MKV + any extras at the same level (`Movie.MKV` +
-`Movie.Extras.The.Cast.Remembers.mkv` etc.) ARE the duplicates to prune.
-Those land in a synthetic group keyed by the scan root itself, named
-after the source folder. The per-group "select all but the largest"
-shortcut works correctly here: it spares the main movie (largest) and
-checks every extra.
+**Library scope** (`includeRootLevel == false`, the standalone window's
+default):
 
-Subfolder-nested videos still form their own buckets keyed by the
-subfolder, so a release with both top-level extras and a nested
-`Extras/` subfolder will show up as two separate groups in the same
-wizard step.
+- Buckets by first path component beneath the scan root.
+- Skips videos that live directly at the scan root — multiple loose
+  top-level movies in `/movies/` are independent movies, not duplicates.
+- Keeps only buckets with `count > 1`. Single-video movie folders
+  aren't "duplicates" worth flagging.
+
+**Import scope** (`includeRootLevel == true`, passed by the import
+wizard):
+
+- Buckets by first path component beneath the scan root, **and** root-
+  level loose videos go into a synthetic group keyed by the scan root.
+- Drops the `count > 1` filter entirely — *every* video in the source
+  is shown, even singletons. The user wants a full inventory so they
+  can prune extras, not just multi-video folders.
+- Reason it's the wider net: extras don't always cluster. A release
+  like Deliverance has the main MKV at the source root and exactly one
+  nested extra three folders deep, in its own subfolder. Two single-
+  entry buckets — both would be hidden by `count > 1`, so the user
+  would never see the extra to delete it.
+
+Sub-folder-nested videos still form their own buckets keyed by the
+subfolder, so the folder context is preserved. The per-group "select
+all but the largest" shortcut still spares the main movie (largest)
+and checks every extra in a multi-video bucket — useful when a release
+has a real `Extras/` folder with multiple files inside.
+
+### 6.6.2 Move to Library: only-what-we-touched
+
+The Move to Library step in the import wizard moves *only the top-level
+items beneath the source that the import is responsible for*, not every
+top-level item in the source directory. Tracked-item detection: for
+each entry in `session.movies`, compute its first path component
+beneath `sourceDirectory` and add that name to a Set. Move only those
+items.
+
+This matters because:
+
+- A single-movie source like Deliverance often has a manually-organized
+  `Extras-Grym/` subfolder next to the canonical wrapper we created.
+  Pre-fix behavior was `contentsOfDirectory.sorted()` — every top-level
+  item moved, including the extras subfolder we never touched.
+- Likewise leftover NFOs / posters / `.DS_Store` were getting dragged
+  across.
+
+The fix keeps the move tight: after rename, each movie's path is
+`<source>/<canonical-wrapper>/<canonical>.ext` — its first component
+beneath source is the wrapper, so the wrapper moves. Anything outside
+that set stays in the source where the user put it. The user can then
+clean up extras manually or via the multi-video step on a re-import.
+
+Edge case: if a video is *unmatched* (no TMDB match, so rename didn't
+process it), its path is the original loose-at-root path and only that
+single file moves — its sidecars don't come along. In practice the
+user is expected to match before moving; we don't try to harvest
+strays.
+
+The auto-prune toggle (§6.7) continues to fire only when the source
+directory ends up empty of non-hidden entries, which now means
+"every wrapper we created has moved out AND there's nothing else the
+user added." Cleaner outcome than the pre-fix behavior, which always
+left source empty (because everything moved).
 
 ### 6.7 The import wizard's source-dir cases
 

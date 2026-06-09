@@ -149,7 +149,7 @@ struct ImportView: View {
                 FileCleanupView(category: .text, scopedDirectory: session.sourceDirectory, embedded: true)
             }
         case .multiVideo:
-            embeddedSection(title: "Folders with multiple video files (samples, extras). Keep one; delete the rest. Loose videos at the source root are included — the main movie + any extras sitting next to it both show up here.") {
+            embeddedSection(title: "Every video file in the source, grouped by its parent folder (loose ones at the source root form their own group). The main movie usually sits at the top — check anything else you'd consider an extra and delete it.") {
                 DuplicatesView(
                     scopedDirectory: session.sourceDirectory,
                     embedded: true,

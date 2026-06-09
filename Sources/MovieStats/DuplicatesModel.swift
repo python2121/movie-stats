@@ -175,8 +175,20 @@ final class DuplicatesModel {
             }
         }
 
+        // Library scope: only buckets with more than one video are
+        // "duplicates" worth flagging — singletons in their own movie
+        // folders are independent movies.
+        //
+        // Import scope (`includeRootLevel == true`): drop the count
+        // threshold. The user wants a *full inventory* of every video
+        // in the source — main movie + every nested extra in its own
+        // subfolder — so they can prune anything that isn't the main
+        // feature. Cases like Deliverance, where the main MKV sits at
+        // the root and the single extra sits three folders deep, end
+        // up with two single-entry buckets that would otherwise both
+        // be hidden by a `> 1` filter.
         return buckets
-            .filter { $0.value.count > 1 }
+            .filter { _, files in includeRootLevel || files.count > 1 }
             .map { directory, files in
                 DuplicateGroup(
                     directory: directory,
