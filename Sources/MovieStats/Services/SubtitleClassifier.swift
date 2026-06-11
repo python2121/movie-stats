@@ -34,9 +34,32 @@ enum SubtitleClassifier {
     }
 
     /// True if `folderName` matches one of the well-known subtitle folder
-    /// aliases.
+    /// aliases. Matches in two passes:
+    ///
+    ///   1. **Exact lowercased match** against the alias set — catches
+    ///      `subs/`, `Subtitles/`, `subz/` etc. as the canonical short
+    ///      forms.
+    ///   2. **Prefix-with-boundary match** for the longer aliases only
+    ///      (`subtitles`, `subtitle`, `subs`) — catches release-group
+    ///      shapes like `Subtitles Eng [SubRip - MicroDVD]/`,
+    ///      `Subtitles [SubRip-MicroDVD]/`, `Subtitle,info/`. The next
+    ///      character after the prefix has to be non-alphanumeric so
+    ///      `Subway` and friends don't false-match.
+    ///
+    /// The short aliases (`s`, `sub`, `subz`) stay exact-match only —
+    /// prefix-matching them would catch unrelated folders like `Some/`
+    /// or `Subway/`.
     static func isSubtitleFolderAlias(_ folderName: String) -> Bool {
-        subtitleFolderAliases.contains(folderName.lowercased())
+        let lower = folderName.lowercased()
+        if subtitleFolderAliases.contains(lower) { return true }
+        let prefixCandidates = ["subtitles", "subtitle", "subs"]
+        for alias in prefixCandidates where lower.hasPrefix(alias) {
+            let boundaryIdx = lower.index(lower.startIndex, offsetBy: alias.count)
+            if boundaryIdx == lower.endIndex { return true }
+            let next = lower[boundaryIdx]
+            if !next.isLetter && !next.isNumber { return true }
+        }
+        return false
     }
 
     /// Pulls the language code, qualifier flags, and optional descriptor out

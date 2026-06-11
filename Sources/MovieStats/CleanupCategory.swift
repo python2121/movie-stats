@@ -36,7 +36,11 @@ struct CleanupCategory: Identifiable, Hashable {
         id: "text",
         title: "Text & NFO Files",
         noun: "file",
-        extensions: ["txt", "nfo", "rtf"],
+        // `.sfv` is a scene-release checksum file — plain text with CRC32
+        // hashes, useless once the user has the file. Included alongside
+        // .txt/.nfo/.rtf so the same cleanup window catches all the
+        // release-cruft sidecars in one pass.
+        extensions: ["txt", "nfo", "rtf", "sfv"],
         preview: .text
     )
 }
