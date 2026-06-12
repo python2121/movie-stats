@@ -141,7 +141,11 @@ final class ChatModel {
       audio_languages TEXT (CSV ISO-639),
       subtitle_codecs TEXT (CSV), subtitle_languages TEXT (CSV ISO-639),
       movie_type TEXT, probed_at REAL,
-      tmdb_id INTEGER             -- FK → tmdb_movies.tmdb_id; NULL = unmatched
+      tmdb_id INTEGER,            -- FK → tmdb_movies.tmdb_id; NULL = unmatched
+      watched_at REAL,            -- user marked watched (unix ts); NULL = unwatched
+      personal_rating INTEGER,    -- user's own 1-5 star rating; NULL = unrated
+      first_seen_at REAL          -- when the file first appeared in a scan
+                                  -- (survives rescans = "added to library" date)
 
     movie_type values: '4K UHD Remux', '1080p Blu-ray Remux', '4K Encode',
       '1080p Encode', '720p Encode', 'SD', 'Unknown'
@@ -173,6 +177,18 @@ final class ChatModel {
 
     Table `imdb_metadata` — single-row marker:
       id INTEGER (= 1), last_downloaded_at REAL, entry_count INTEGER
+
+    Table `subtitle_files` — sidecar subtitle files found on disk:
+      path TEXT (PK),
+      movie_path TEXT,            -- FK → movies.path; NULL = unattributed orphan
+      filename TEXT, size INTEGER (bytes),
+      language TEXT (ISO 639-1 or NULL when untagged),
+      descriptor TEXT ('commentary' | 'traditional' | … | NULL),
+      is_sdh INTEGER (0/1), is_forced INTEGER (0/1),
+      format TEXT ('srt' | 'sup' | 'idx' | 'sub' | 'ass' | …),
+      date_scanned REAL
+      → embedded subtitle *tracks* live in movies.subtitle_codecs /
+        subtitle_languages; this table is only the external sidecar files.
 
     Output rules:
       • For display titles, prefer the canonical TMDB title when the movie

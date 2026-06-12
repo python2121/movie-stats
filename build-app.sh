@@ -66,6 +66,12 @@ cat >"${APP_DIR}/Contents/Info.plist" <<PLIST
   <true/>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.video</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>© $(date +%Y) Andrew Nowicki</string>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
 </dict>
 </plist>
 PLIST

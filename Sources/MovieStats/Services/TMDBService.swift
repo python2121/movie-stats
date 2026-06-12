@@ -225,6 +225,37 @@ struct TMDBMovieDetail: Codable, Sendable, Hashable {
     }
 }
 
+// MARK: - Videos (trailers)
+
+struct TMDBVideo: Decodable, Sendable, Hashable {
+    let key: String
+    let site: String
+    let type: String
+    let name: String
+    let official: Bool?
+
+    var youtubeURL: URL? {
+        guard site.lowercased() == "youtube" else { return nil }
+        return URL(string: "https://www.youtube.com/watch?v=\(key)")
+    }
+}
+
+// MARK: - Collection detail
+
+/// `/collection/{id}` response — the franchise and every movie in it.
+struct TMDBCollectionDetail: Decodable, Sendable, Hashable {
+    let id: Int
+    let name: String
+    let overview: String?
+    let posterPath: String?
+    let parts: [TMDBMovie]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, overview, parts
+        case posterPath = "poster_path"
+    }
+}
+
 // MARK: - Service
 
 /// Tiny URLSession-based wrapper around TMDB's v3 API. Supports either auth
@@ -371,6 +402,51 @@ enum TMDBService {
         try check(response: response, data: data)
 
         guard let decoded = try? JSONDecoder().decode(TMDBMovieDetail.self, from: data) else {
+            throw TMDBError.decode
+        }
+        return decoded
+    }
+
+    /// Best YouTube trailer for a movie: official trailers first, then any
+    /// trailer, then a teaser. Nil when TMDB has no usable video.
+    static func trailer(forID id: Int) async throws -> TMDBVideo? {
+        guard let key = apiKey else { throw TMDBError.missingAPIKey }
+
+        var components = URLComponents(string: "https://api.themoviedb.org/3/movie/\(id)/videos")!
+        let request = makeRequest(
+            components: &components,
+            items: [URLQueryItem(name: "language", value: "en-US")],
+            key: key
+        )
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response: response, data: data)
+
+        struct VideosResponse: Decodable { let results: [TMDBVideo] }
+        guard let decoded = try? JSONDecoder().decode(VideosResponse.self, from: data) else {
+            throw TMDBError.decode
+        }
+        let youtube = decoded.results.filter { $0.youtubeURL != nil }
+        let trailers = youtube.filter { $0.type.lowercased() == "trailer" }
+        return trailers.first { $0.official == true }
+            ?? trailers.first
+            ?? youtube.first { $0.type.lowercased() == "teaser" }
+    }
+
+    /// Full `/collection/{id}` payload — every movie in a franchise. Used by
+    /// the Collections window to find what's missing from the library.
+    static func collection(forID id: Int) async throws -> TMDBCollectionDetail {
+        guard let key = apiKey else { throw TMDBError.missingAPIKey }
+
+        var components = URLComponents(string: "https://api.themoviedb.org/3/collection/\(id)")!
+        let request = makeRequest(
+            components: &components,
+            items: [URLQueryItem(name: "language", value: "en-US")],
+            key: key
+        )
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response: response, data: data)
+
+        guard let decoded = try? JSONDecoder().decode(TMDBCollectionDetail.self, from: data) else {
             throw TMDBError.decode
         }
         return decoded

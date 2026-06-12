@@ -31,6 +31,42 @@ shows:
 A movie is any file whose extension is one of:
 `mp4, mkv, avi, mov, m4v, wmv, flv, webm, mpg, mpeg, m2ts, ts, vob, ogv`.
 
+Each row has a play button (and a context-menu item) that opens the file
+in [IINA](https://iina.io) when it's installed, falling back to the system
+default player otherwise.
+
+Rescans also inventory every sidecar subtitle file (`.srt`, `.sup`,
+`.idx/.sub`, …) into the database — language, SDH / forced flags, and
+which movie each one belongs to — shown in the movie detail sheet and
+queryable from the Ask Claude panel.
+
+### Watching & curation
+
+- **Watch state + your own 1–5 star rating** per movie (context menu or the
+  detail sheet) — independent of IMDb/TMDB scores, persisted in the library
+  database, exported in the CSV.
+- **Poster wall** — toggle the main list into a Plex-style grid of cached
+  TMDB posters; missing artwork is fetched lazily as you scroll.
+- **Filters** — type, genre, decade, TMDB-match, and watched state, all in
+  one Filters menu; sort by size, title (ignoring "The"), IMDb rating,
+  year, recently added, or recently watched.
+- **Surprise Me** (🎲 toolbar) — weighted random pick of something
+  unwatched and well-rated, respecting the current filters.
+- **Library Reports** (⌥⌘1) — missing English subtitles, upgrade
+  candidates (great movies in bad encodes), duplicate TMDB matches,
+  VobSub orphans, unmatched movies, and "space savers" (big files with
+  low ratings), with permanent-delete actions where it's safe.
+- **Collections** (⌥⌘2) — franchise completeness against TMDB: "you own
+  2 of 4 John Wick movies", with links to the missing ones.
+- **Insights** (⌥⌘3) — charts: movies by decade, top genres, IMDb rating
+  distribution, watch progress by quality type, plus total-runtime and
+  average-size headline stats.
+- **Trailer button** in the detail sheet (opens the TMDB-listed YouTube
+  trailer), plus IMDb / TMDB links, and **Quick Look** from any row's
+  context menu.
+- Scans keep the Mac awake (no more dead SMB walks) and post a
+  notification when they finish in the background.
+
 Filtering options in the toolbar: by TMDB-match status (All / Matched /
 Unmatched) and by classification bucket (4K Remux, 1080p Encode, …).
 
@@ -49,7 +85,7 @@ assigns each movie a category: **4K UHD Remux / 1080p Blu-ray Remux /
 
 ### TMDB matching
 
-Once you've set a TMDB API key (File → TMDB API Key…), the **Match TMDB**
+Once you've set a TMDB API key (MovieStats → Settings…, ⌘,), the **Match TMDB**
 toolbar button opens a window that finds every unmatched file, searches
 TMDB for it, and shows the best auto-match as a sortable table. Auto-match
 rules:
@@ -208,7 +244,7 @@ the empty husk afterwards.
 ## Ask Claude
 
 A chat panel slides in from the right of the main window when the
-**Query the AI God** toolbar button is clicked. Driven by the local
+**Ask Claude** toolbar button is clicked. Driven by the local
 [`claude`](https://claude.com/claude-code) CLI, billed against your
 Anthropic subscription. Asks questions like:
 

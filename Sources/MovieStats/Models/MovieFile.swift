@@ -28,6 +28,25 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// look it up via `MovieStore.tmdbDetail(forID:)`.
     var tmdbId: Int?
 
+    /// When this path first appeared in a scan — unlike `dateScanned`, it
+    /// survives rescans, so it means "added to the library".
+    var firstSeenAt: Date?
+    /// When the user marked this movie watched, nil = unwatched.
+    var watchedAt: Date?
+    /// User's own 1–5 star rating, independent of IMDb/TMDB scores.
+    var personalRating: Int?
+
+    /// Genre names from the joined TMDB record (decoded from genres_json).
+    var genres: [String] = []
+    /// TMDB runtime in minutes.
+    var runtimeMinutes: Int?
+    /// TMDB collection ("franchise") this movie belongs to, when matched.
+    var collectionID: Int?
+    var collectionName: String?
+    /// TMDB poster path (e.g. "/abc.jpg") — lets the poster wall fetch
+    /// artwork on demand for matches confirmed before poster caching existed.
+    var posterPath: String?
+
     /// IMDb tconst pulled from the joined TMDB record. Nil for unmatched
     /// movies or TMDB records that don't carry an IMDb id.
     var imdbId: String?
@@ -56,6 +75,17 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// TMDB's preferred-release year → filename-parsed year.
     var effectiveYear: Int? {
         confirmedYear ?? tmdbYear ?? parsedYear
+    }
+
+    /// Title-sort key that ignores leading English articles, so
+    /// "The Matrix" files under M — matching Plex / Finder-adjacent
+    /// media-library convention.
+    var sortTitle: String {
+        let title = displayTitle.lowercased()
+        for article in ["the ", "a ", "an "] where title.hasPrefix(article) {
+            return String(title.dropFirst(article.count))
+        }
+        return title
     }
 
     /// `"Title (Year)"`. Prefers the canonical TMDB title + year when the

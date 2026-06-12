@@ -121,10 +121,19 @@ Each tool window has its own `*Model.swift` + `*View.swift` pair:
 | Empty Folders                | `EmptyFoldersModel`    | `EmptyFoldersView`    |
 | IMDb Ratings                 | `IMDbModel`            | `IMDbView`            |
 | Import                       | `ImportSession`        | `ImportView`          |
+| Library Reports              | `ReportsModel`         | `ReportsView`         |
+| Collections                  | `CollectionsModel`     | `CollectionsView`     |
+| Insights                     | — (reads AppModel)     | `InsightsView`        |
+| Settings (⌘,)                | — (UserDefaults)       | `SettingsView`        |
 | Ask Claude (panel, not window) | `ChatModel`          | `ChatPanel`           |
 
 Window registration lives in `MovieStatsApp.swift`; toolbar buttons that
-open them live in `ContentView.swift`'s `toolbarContent`.
+open them live in `ContentView.swift`'s `toolbarContent` (a customizable
+`.toolbar(id:)` — every item also has a Library-menu counterpart in
+`MovieStatsApp.swift`'s `LibraryCommands`, so menu and toolbar must stay
+in sync when adding a tool). The main scene is a single `Window`, not a
+`WindowGroup` — `AppModel` is app-wide state, so multiple main windows
+would just mirror each other.
 
 ---
 
@@ -168,6 +177,10 @@ movie_type            TEXT                -- MovieType.rawValue, see classifier
 probed_at             REAL                -- timestamp; NULL = probe pending
 tmdb_id               INTEGER             -- joined into tmdb_movies
 confirmed_year        INTEGER             -- see §6.2
+watched_at            REAL                -- user watch state; NULL = unwatched
+personal_rating       INTEGER             -- user's own 1–5 stars
+first_seen_at         REAL                -- stamped on first INSERT, never
+                                          -- updated on rescan = "added" date
 ```
 
 Index on `movie_type` and `tmdb_id`.
@@ -192,6 +205,23 @@ movies query via `tmdb_movies.imdb_id`.
 A `CHECK (id = 1)`-constrained one-row table holding `last_downloaded_at`
 and `entry_count` for the IMDb dataset. UI uses this to show "Last refreshed
 N days ago."
+
+### `subtitle_files` — sidecar subtitle inventory
+
+Keyed by `path`. One row per external subtitle file found during a rescan
+(`SubtitleScanner`), with `SubtitleClassifier.parse` output baked in:
+`movie_path` (nullable FK → `movies.path`), `language`, `descriptor`,
+`is_sdh`, `is_forced`, `format`.
+
+**Rebuilt wholesale on every rescan** (`replaceAllSubtitleFiles` —
+DELETE + reinsert in one transaction). Attribution walks up from the
+subtitle's folder to the first directory directly containing videos
+(covers siblings, `Subs/`, nested per-language folders), then:
+basename-prefix match → sole video → NULL (orphan, kept but
+unattributed). Consequence of the rebuild-on-rescan design:
+`movie_path` goes stale between a Rename Library apply and the next
+rescan — the detail sheet just shows no sidecar subs until then.
+That's accepted, not a bug.
 
 ### Migrations
 
@@ -456,6 +486,17 @@ The Ready step has an opt-in **Delete the source directory afterwards if
 it's left empty** toggle. Triggers only when the source has no non-hidden
 entries remaining post-move. Permanent delete (no Trash on network volumes).
 
+**Duplicate replacement:** `ImportSession.duplicateConflicts` flags any
+imported movie whose confirmed TMDB id already exists in the live library.
+The Ready step lists the conflicts (existing path / size / type), and Move
+to Library routes through a Replace-and-Move / Cancel confirmation instead
+of moving directly. `replaceExistingCopies()` deletes each library copy —
+the whole wrapper folder when it's inside the library root and contains no
+*other* library movie, otherwise just the video plus its attributed
+`subtitle_files` rows — then deletes the `movies` row. Only after that
+does the normal `moveToLibrary()` run, so the path-level "already exists
+at destination" skip never fires for replaced items.
+
 ### 6.8 Permanent deletes, no Trash
 
 Every "Delete Selected" / "Move to Library" / auto-prune operation uses
@@ -518,10 +559,10 @@ also dictates the rules for joining (use `COALESCE` precedence:
 
 ### 6.13 The TMDB API key
 
-Stored in `UserDefaults` under `tmdbAPIKey`. Set via the **File → TMDB API
-Key…** menu item, which pops an NSAlert with a secure text field. The app
-accepts either a v3 key or a v4 read-access token (it picks one by length
-heuristic in `TMDBService.apiKey`).
+Stored in `UserDefaults` under `tmdbAPIKey`. Set in the Settings window
+(⌘, — `SettingsView.swift`), which also shows the Application Support data
+location. The app accepts either a v3 key or a v4 read-access token (it
+picks one by length heuristic in `TMDBService.apiKey`).
 
 If the key is missing, the matcher's "Has API Key" indicator goes red and
 scanning is disabled.
@@ -556,6 +597,40 @@ human-readable memories Claude has accumulated about this user. Lines after
 200 get truncated when the index is auto-loaded into context, so keep
 entries one line each. (This is about the Claude memory system, mentioned
 here only because it sometimes shows up in conversation context.)
+
+### 6.18 The curation layer (watch state, reports, collections)
+
+Added June 2026, cribbing from Plex / Radarr / tinyMediaManager:
+
+- **Watch state + stars** live on the `movies` row (`watched_at`,
+  `personal_rating`). `AppModel.setWatched` / `setPersonalRating` write
+  through and patch the in-memory array in place — no reload.
+- **Reports** (`ReportsModel`) are pure functions over
+  `appModel.movies` + `subtitle_files`; nothing is persisted. The
+  Delete File action there is a *permanent* delete (§6.8) followed by a
+  DB row delete + report recompute.
+- **Collections** fetches `/collection/{id}` live on window open; counts
+  exclude unreleased parts so a franchise with an announced sequel still
+  reads "complete".
+- **Poster wall** loads from `PosterCache` and lazily backfills missing
+  artwork via `MovieFile.posterPath` as cells scroll into view (matches
+  confirmed before poster caching existed have no cached JPG).
+- **first_seen_at** is the "added to library" timestamp — set once on
+  INSERT, deliberately not touched by the rescan upsert. `date_scanned`
+  is useless for that purpose because every rescan rewrites it.
+- The toolbar is customizable (`.toolbar(id:)`); cleanup/maintenance
+  items ship `showsByDefault: false` to keep the default bar sane. Every
+  toolbar action also lives in the Library menu — keep both in sync.
+- **Window shortcuts use ⌥⌘1/2/3, not ⇧⌘** — ⇧⌘3/4/5 are the system
+  screenshot shortcuts and never reach the app.
+- **The scan sheet is cancellable** (`AppModel.cancelRequested`): Cancel
+  stops scheduling new ffprobe tasks; in-flight ones finish; unprobed
+  rows keep `probed_at` NULL so the next Rescan resumes where it left
+  off. Escape maps to Cancel via `.keyboardShortcut(.cancelAction)`.
+- Menu-item ellipsis rule applied: "…" only on items needing further
+  input (Open Directory…, Import…); informational windows (Reports,
+  Collections, Insights) get none. The default Help menu is removed
+  (no help book ships).
 
 ---
 
@@ -652,12 +727,14 @@ here only because it sometimes shows up in conversation context.)
 
 ```
 Sources/MovieStats/
-  MovieStatsApp.swift          @main App scene; defines every window
+  MovieStatsApp.swift          @main App scene; every window + Library menu
+  SettingsView.swift           Settings window (⌘,): TMDB key, data location
   ContentView.swift            main window: toolbar + stats + ranked list
   AppModel.swift               owns store, scans, probes — conforms to MovieScope
   MovieScope.swift             the protocol; AppModel + ImportSession conform
   Models/
     MovieFile.swift            in-memory shape of a movie row
+    SubtitleFile.swift         in-memory shape of a subtitle_files row
   Services/
     FileScanner.swift          recursive walk, used by scanners
     DirectoryScanner.swift     movie-extension scan
@@ -668,6 +745,8 @@ Sources/MovieStats/
     PosterCache.swift          on-disk JPG cache for matched posters
     TitleParser.swift          filename → (title, year) best-effort
     SubtitleClassifier.swift   subtitle parsing + composing (see §6.3)
+    SubtitleScanner.swift      sidecar subtitle discovery + movie attribution
+    ExternalPlayer.swift       play in IINA (falls back to default player)
     FilenameSanitizer.swift    sanitize Title (Year) {tmdb-N} for disk
     Thumbnailer.swift          ImageIO downsampling for cleanup previews
     TextPreview.swift          short text snippet for cleanup previews
@@ -690,6 +769,11 @@ Sources/MovieStats/
   ImportView.swift             import wizard window
   IMDbModel.swift              dataset-download workflow state
   IMDbView.swift
+  ReportsModel.swift           library-health reports (subs/upgrades/dupes/…)
+  ReportsView.swift            sidebar + findings list, with permanent delete
+  CollectionsModel.swift       TMDB franchise completeness (live fetch)
+  CollectionsView.swift
+  InsightsView.swift           decade/genre/rating/watch-progress charts
   ChatModel.swift              Ask Claude panel state
   ChatPanel.swift              overlaid chat UI
   ChatMarkdownTheme.swift      Markdown rendering theme for chat

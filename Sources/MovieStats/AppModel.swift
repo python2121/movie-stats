@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import Observation
+import UserNotifications
 
 /// The app's single source of truth. Owns the database, the in-memory list of
 /// movies, the directory scan, and the per-file metadata probe. Views observe
@@ -24,6 +26,10 @@ final class AppModel {
     private(set) var isProbing = false
     private(set) var probedCount = 0
     private(set) var probeTotal = 0
+    /// Set by the scan sheet's Cancel button. In-flight ffprobe processes
+    /// finish; nothing new is scheduled. Unprobed rows keep probed_at NULL,
+    /// so the next Rescan resumes exactly where this one stopped.
+    private(set) var cancelRequested = false
     /// Path of the most recently kicked-off probe — drives the live filename
     /// shown in the scanning progress sheet.
     private(set) var currentProbePath: String?
@@ -51,9 +57,15 @@ final class AppModel {
         }
     }
     private static let directoryKey = "selectedDirectoryPath"
+    private static let recentsKey = "recentDirectoryPaths"
+
+    /// Most-recently-opened library roots, newest first. Drives the
+    /// Library → Open Recent menu.
+    private(set) var recentDirectories: [String]
 
     init() {
         directoryPath = UserDefaults.standard.string(forKey: Self.directoryKey) ?? ""
+        recentDirectories = UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? []
 
         // Open the store once. If opening or the initial load fails, surface
         // the error and run without a backing store.
@@ -78,6 +90,10 @@ final class AppModel {
         movies.filter { $0.size >= Self.largeFileThreshold }.count
     }
 
+    var unwatchedCount: Int {
+        movies.filter { $0.watchedAt == nil }.count
+    }
+
     var totalSize: Int64 {
         movies.reduce(0) { $0 + $1.size }
     }
@@ -91,6 +107,62 @@ final class AppModel {
 
     // MARK: - Actions
 
+    /// Shows the standard open panel and points the library at the chosen
+    /// directory. Used by the toolbar button and the Library → Open Directory
+    /// menu item.
+    func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Scan"
+        panel.message = "Choose a directory to scan for movies"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setDirectory(url.path)
+    }
+
+    /// Points the library at a new root, records it in the recents list, and
+    /// kicks off a scan.
+    func setDirectory(_ path: String) {
+        directoryPath = path
+        var recents = recentDirectories.filter { $0 != path }
+        recents.insert(path, at: 0)
+        recentDirectories = Array(recents.prefix(8))
+        UserDefaults.standard.set(recentDirectories, forKey: Self.recentsKey)
+        Task { await rescan() }
+    }
+
+    func clearRecentDirectories() {
+        recentDirectories = []
+        UserDefaults.standard.removeObject(forKey: Self.recentsKey)
+    }
+
+    func setWatched(_ movie: MovieFile, watched: Bool) {
+        let date = watched ? Date() : nil
+        do {
+            try store?.setWatched(path: movie.path, watchedAt: date)
+        } catch {
+            lastError = "\(error)"
+            return
+        }
+        if let idx = movies.firstIndex(where: { $0.path == movie.path }) {
+            movies[idx].watchedAt = date
+        }
+    }
+
+    func setPersonalRating(_ movie: MovieFile, rating: Int?) {
+        do {
+            try store?.setPersonalRating(path: movie.path, rating: rating)
+        } catch {
+            lastError = "\(error)"
+            return
+        }
+        if let idx = movies.firstIndex(where: { $0.path == movie.path }) {
+            movies[idx].personalRating = rating
+        }
+    }
+
     /// Rescans the current directory: crawls the filesystem off the main
     /// actor, reconciles the database (new files added, missing files
     /// removed, existing files keep their probed metadata), then starts a
@@ -100,28 +172,47 @@ final class AppModel {
 
         isScanning = true
         lastError = nil
-        defer { isScanning = false }
+        cancelRequested = false
+        // Long scans over SMB die if the Mac idle-sleeps mid-walk.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Scanning movie library"
+        )
+        defer {
+            isScanning = false
+            ProcessInfo.processInfo.endActivity(activity)
+            notifyScanFinished()
+        }
 
         let url = URL(fileURLWithPath: directoryPath)
-        let scanned = await Task.detached(priority: .userInitiated) {
-            DirectoryScanner.scan(directory: url)
+        let (scanned, subtitles) = await Task.detached(priority: .userInitiated) {
+            let videos = DirectoryScanner.scan(directory: url)
+            let subs = SubtitleScanner.scan(directory: url, videos: videos)
+            return (videos, subs)
         }.value
 
         do {
             try store.replaceAll(scanned)
+            try store.replaceAllSubtitleFiles(subtitles)
             movies = try store.allMovies()
         } catch {
             lastError = "\(error)"
             return
         }
 
+        guard !cancelRequested else { return }
         await probeMissing()
+    }
+
+    func cancelScan() {
+        cancelRequested = true
     }
 
     /// Force a re-read of every file's metadata. Clears probed_at then runs
     /// the same path as a normal probe pass.
     func reprobeAll() async {
         guard let store else { return }
+        cancelRequested = false
         do {
             try store.clearAllMetadata()
             movies = try store.allMovies()
@@ -174,7 +265,7 @@ final class AppModel {
                 apply(outcome: outcome, store: store)
                 probedCount += 1
 
-                if nextIndex < pending.count {
+                if nextIndex < pending.count, !cancelRequested {
                     let item = pending[nextIndex]
                     nextIndex += 1
                     currentProbePath = item.path
@@ -235,5 +326,27 @@ final class AppModel {
         let path: String
         let size: Int64
         let info: MediaInfo?
+    }
+
+    /// Posts a "scan finished" user notification, but only when the app is
+    /// in the background — if the user is looking at the window they can
+    /// already see the result. Guarded to the bundled .app: the
+    /// notification center API aborts in a bare `swift run` binary.
+    private func notifyScanFinished() {
+        guard Bundle.main.bundleIdentifier != nil,
+              !NSApplication.shared.isActive
+        else { return }
+        let count = movieCount
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Library scan finished"
+            content.body = "\(count) movies indexed."
+            UNUserNotificationCenter.current().add(UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: nil
+            ))
+        }
     }
 }

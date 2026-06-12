@@ -7,12 +7,15 @@ struct MovieStatsApp: App {
     @State private var chatModel = ChatModel()
 
     var body: some Scene {
-        WindowGroup {
+        // A single main window — the model is app-wide state, so a second
+        // main window would just mirror the first.
+        Window("Movie Stats", id: "main") {
             ContentView()
                 .environment(model)
                 .environment(chatModel)
         }
         .windowResizability(.contentMinSize)
+        .defaultSize(width: 1280, height: 820)
         .commands {
             // Anchored to .newItem so the entry appears near the top of the
             // File menu, above Close.
@@ -23,11 +26,14 @@ struct MovieStatsApp: App {
                 .keyboardShortcut("E", modifiers: [.command, .shift])
                 .disabled(model.movies.isEmpty)
             }
-            CommandGroup(after: .appSettings) {
-                Button("TMDB API Key…") {
-                    promptForTMDBKey()
-                }
-            }
+            LibraryCommands(model: model)
+            // No help book ships with the app — an inert "MovieStats Help"
+            // item would violate the HIG, so remove the default.
+            CommandGroup(replacing: .help) {}
+        }
+
+        Settings {
+            SettingsView()
         }
 
         Window(CleanupCategory.images.title, id: CleanupCategory.images.id) {
@@ -77,25 +83,24 @@ struct MovieStatsApp: App {
                 .environment(model)
         }
         .windowResizability(.contentMinSize)
-    }
 
-    /// Opens an NSAlert with an inline text field for the user's TMDB API
-    /// key (either a v3 key or a v4 read access token). Persists via
-    /// `TMDBService.setAPIKey`.
-    @MainActor
-    private func promptForTMDBKey() {
-        let alert = NSAlert()
-        alert.messageText = "TMDB API Key"
-        alert.informativeText = "Paste your TMDB API key (v3) or read-access token (v4). Get one at themoviedb.org → Settings → API."
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        field.placeholderString = "API key"
-        field.stringValue = TMDBService.apiKey ?? ""
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            TMDBService.setAPIKey(field.stringValue)
+        Window("Library Reports", id: "reports") {
+            ReportsView()
+                .environment(model)
         }
+        .windowResizability(.contentMinSize)
+
+        Window("Collections", id: "collections") {
+            CollectionsView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
+
+        Window("Insights", id: "insights") {
+            InsightsView()
+                .environment(model)
+        }
+        .windowResizability(.contentMinSize)
     }
 
     /// Prompts for a destination then writes a CSV snapshot of the library.
@@ -116,6 +121,83 @@ struct MovieStatsApp: App {
         } catch {
             let alert = NSAlert(error: error)
             alert.runModal()
+        }
+    }
+}
+
+/// The Library menu — every workflow reachable from the toolbar is also
+/// reachable (and keyboard-drivable) from the menu bar, per macOS convention.
+private struct LibraryCommands: Commands {
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandMenu("Library") {
+            Button("Open Directory…") { model.chooseDirectory() }
+                .keyboardShortcut("o")
+
+            Menu("Open Recent") {
+                ForEach(model.recentDirectories, id: \.self) { path in
+                    Button((path as NSString).abbreviatingWithTildeInPath) {
+                        model.setDirectory(path)
+                    }
+                }
+                Divider()
+                Button("Clear Menu") { model.clearRecentDirectories() }
+                    .disabled(model.recentDirectories.isEmpty)
+            }
+
+            Divider()
+
+            Button("Rescan") { Task { await model.rescan() } }
+                .keyboardShortcut("r")
+                .disabled(!model.hasDirectory || model.isScanning)
+
+            Button("Reprobe All") { Task { await model.reprobeAll() } }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(!model.hasDirectory || model.isScanning || model.isProbing)
+
+            Divider()
+
+            Button("Import…") { openWindow(id: "import") }
+                .keyboardShortcut("i")
+
+            Button("Match Library to TMDB…") { openWindow(id: "tmdb-matcher") }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .disabled(!model.hasDirectory)
+
+            Button("Rename Library…") { openWindow(id: "rename-library") }
+                .disabled(!model.hasDirectory)
+
+            Divider()
+
+            Menu("Cleanup") {
+                Button("Images…") { openWindow(id: CleanupCategory.images.id) }
+                Button("Text Files…") { openWindow(id: CleanupCategory.text.id) }
+                Button("Multiple Videos per Folder…") { openWindow(id: "duplicates") }
+                Button("Empty Folders…") { openWindow(id: "empty-folders") }
+            }
+            .disabled(!model.hasDirectory)
+
+            Button("IMDb Ratings…") { openWindow(id: "imdb-ratings") }
+
+            Divider()
+
+            // ⌥⌘ rather than ⇧⌘ — ⇧⌘3/4/5 are the system screenshot
+            // shortcuts and would swallow these before the app sees them.
+            // No ellipsis: these windows show information, they don't ask
+            // for further input.
+            Button("Library Reports") { openWindow(id: "reports") }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+                .disabled(!model.hasDirectory)
+
+            Button("Collections") { openWindow(id: "collections") }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+                .disabled(!model.hasDirectory)
+
+            Button("Insights") { openWindow(id: "insights") }
+                .keyboardShortcut("3", modifiers: [.command, .option])
+                .disabled(!model.hasDirectory)
         }
     }
 }

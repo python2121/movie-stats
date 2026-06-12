@@ -12,12 +12,15 @@ import Foundation
 ///   - **Size** — human-readable file size
 enum CSVExporter {
     static func libraryCSV(movies: [MovieFile]) -> String {
-        var lines: [String] = ["Title,Year,Content Type,Size"]
+        var lines: [String] = [
+            "Title,Year,Content Type,Size,Genres,Runtime (min),IMDb Rating,My Rating,Watched"
+        ]
 
         let sorted = movies.sorted {
-            $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
+            $0.sortTitle.localizedStandardCompare($1.sortTitle) == .orderedAscending
         }
 
+        let dateFormat = Date.FormatStyle(date: .numeric, time: .omitted)
         for movie in sorted {
             var parts: [String] = []
             if let type = movie.movieType, !type.isEmpty {
@@ -33,13 +36,18 @@ enum CSVExporter {
             let typeList = parts.joined(separator: " | ")
             let size = ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file)
             let titleOnly = movie.parsedTitle.isEmpty ? movie.filename : movie.parsedTitle
-            let yearStr = movie.parsedYear.map(String.init) ?? ""
+            let yearStr = movie.effectiveYear.map(String.init) ?? ""
 
             lines.append([
                 escape(titleOnly),
                 yearStr,
                 escape(typeList),
                 escape(size),
+                escape(movie.genres.joined(separator: " | ")),
+                movie.runtimeMinutes.map(String.init) ?? "",
+                movie.imdbRating.map { String(format: "%.1f", $0) } ?? "",
+                movie.personalRating.map(String.init) ?? "",
+                movie.watchedAt.map { $0.formatted(dateFormat) } ?? "",
             ].joined(separator: ","))
         }
 

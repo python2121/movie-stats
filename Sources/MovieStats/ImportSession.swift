@@ -188,6 +188,86 @@ final class ImportSession: MovieScope {
         currentStep = step
     }
 
+    // MARK: - Duplicate detection (imported movie already in the library)
+
+    struct DuplicateConflict: Identifiable {
+        let imported: MovieFile
+        /// Library copies matched to the same TMDB id (usually one, but a
+        /// library can hold accidental duplicates).
+        let existing: [MovieFile]
+        var id: String { imported.path }
+    }
+
+    /// Imported movies whose confirmed TMDB id already exists in the live
+    /// library. Recomputed on demand so it stays current as matches are
+    /// confirmed or the library changes.
+    var duplicateConflicts: [DuplicateConflict] {
+        let byTMDB = Dictionary(
+            grouping: appModel.movies.filter { $0.tmdbId != nil },
+            by: { $0.tmdbId! }
+        )
+        return movies.compactMap { movie in
+            guard let id = movie.tmdbId, let copies = byTMDB[id], !copies.isEmpty else {
+                return nil
+            }
+            return DuplicateConflict(imported: movie, existing: copies)
+        }
+    }
+
+    /// Deletes every library copy named in `duplicateConflicts` — the video,
+    /// its sidecar subtitles, and its wrapper folder when the folder belongs
+    /// to that movie alone — so the imported version can take its place.
+    /// Permanent deletes, per the app's no-Trash design.
+    func replaceExistingCopies() async {
+        guard let store = appModel.store, appModel.hasDirectory else { return }
+        isBusy = true
+        busyMessage = "Removing existing copies…"
+        defer {
+            isBusy = false
+            busyMessage = ""
+        }
+
+        let fm = FileManager.default
+        let libraryRoot = URL(fileURLWithPath: appModel.directoryPath).standardizedFileURL.path
+        var failures: [String] = []
+
+        for conflict in duplicateConflicts {
+            for existing in conflict.existing {
+                let parent = URL(fileURLWithPath: existing.path).standardizedFileURL
+                    .deletingLastPathComponent().path
+                // Delete the whole wrapper folder (video + Subs/ + sidecars)
+                // only when it's inside the library, isn't the library root
+                // itself, and no other library movie lives in it.
+                let wrapperDeletable = parent != libraryRoot
+                    && parent.hasPrefix(libraryRoot + "/")
+                    && !appModel.movies.contains {
+                        $0.path != existing.path && $0.path.hasPrefix(parent + "/")
+                    }
+                do {
+                    if wrapperDeletable {
+                        try fm.removeItem(atPath: parent)
+                    } else {
+                        try fm.removeItem(atPath: existing.path)
+                        let subs = (try? store.subtitleFiles(forMoviePath: existing.path)) ?? []
+                        for sub in subs {
+                            try? fm.removeItem(atPath: sub.path)
+                            try? store.deleteSubtitleFile(path: sub.path)
+                        }
+                    }
+                    try store.deleteMovie(path: existing.path)
+                } catch {
+                    failures.append("\(existing.filename): \(error.localizedDescription)")
+                }
+            }
+        }
+
+        appModel.reloadFromStore()
+        if !failures.isEmpty {
+            lastError = "Couldn't remove some existing copies:\n"
+                + failures.joined(separator: "\n")
+        }
+    }
+
     // MARK: - Step 7: Move to Library
 
     /// Final action. Moves *only the items this import is responsible for*

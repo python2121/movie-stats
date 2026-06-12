@@ -92,7 +92,11 @@ final class MovieStore {
             ("probed_at", "REAL"),
             ("tmdb_id", "INTEGER"),
             ("confirmed_year", "INTEGER"),
+            ("watched_at", "REAL"),
+            ("personal_rating", "INTEGER"),
+            ("first_seen_at", "REAL"),
         ]
+        let needsFirstSeenBackfill = !present.contains("first_seen_at")
         let needsConfirmedYearBackfill = !present.contains("confirmed_year")
         for col in columns where !present.contains(col.name) {
             try exec("ALTER TABLE movies ADD COLUMN \(col.name) \(col.ddl);")
@@ -166,8 +170,32 @@ final class MovieStore {
             );
             """)
 
+        // Sidecar subtitle inventory — fully rebuilt on every rescan, so
+        // movie_path associations can go stale between a rename and the
+        // next scan but never longer.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS subtitle_files (
+                path         TEXT PRIMARY KEY,
+                movie_path   TEXT,
+                filename     TEXT NOT NULL,
+                size         INTEGER NOT NULL,
+                language     TEXT,
+                descriptor   TEXT,
+                is_sdh       INTEGER NOT NULL DEFAULT 0,
+                is_forced    INTEGER NOT NULL DEFAULT 0,
+                format       TEXT NOT NULL,
+                date_scanned REAL NOT NULL
+            );
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_subtitle_files_movie ON subtitle_files(movie_path);")
+
         if needsTitleBackfill {
             try backfillParsedTitles()
+        }
+        if needsFirstSeenBackfill {
+            // Best guess for pre-existing rows: the last scan stamp. From
+            // here on, INSERT sets it once and rescans never touch it.
+            try exec("UPDATE movies SET first_seen_at = date_scanned WHERE first_seen_at IS NULL;")
         }
         if needsConfirmedYearBackfill {
             // One-time: for movies already matched to a TMDB record before
@@ -243,9 +271,12 @@ final class MovieStore {
         do {
             let now = Date().timeIntervalSince1970
 
+            // first_seen_at is deliberately absent from the conflict branch —
+            // it's stamped once when the path first appears and survives
+            // every subsequent rescan, powering the "Recently Added" sort.
             let upsertSQL = """
-                INSERT INTO movies (path, filename, size, date_scanned, parsed_title, parsed_year)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO movies (path, filename, size, date_scanned, parsed_title, parsed_year, first_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     filename = excluded.filename,
                     size = excluded.size,
@@ -271,6 +302,7 @@ final class MovieStore {
                 } else {
                     sqlite3_bind_null(stmt, 6)
                 }
+                sqlite3_bind_double(stmt, 7, now)
                 guard sqlite3_step(stmt) == SQLITE_DONE else {
                     throw MovieStoreError.exec(lastErrorMessage())
                 }
@@ -295,6 +327,85 @@ final class MovieStore {
         }
     }
 
+    // MARK: - Sidecar subtitle files
+
+    /// Full-replace of the sidecar subtitle inventory, run as part of every
+    /// library rescan.
+    func replaceAllSubtitleFiles(_ subtitles: [SubtitleFile]) throws {
+        try exec("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            try exec("DELETE FROM subtitle_files;")
+
+            let sql = """
+                INSERT OR REPLACE INTO subtitle_files
+                    (path, movie_path, filename, size, language, descriptor,
+                     is_sdh, is_forced, format, date_scanned)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw MovieStoreError.prepare(lastErrorMessage())
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            let now = Date().timeIntervalSince1970
+            for sub in subtitles {
+                sqlite3_bind_text(stmt, 1, sub.path, -1, SQLITE_TRANSIENT)
+                bindNullableText(stmt, 2, sub.moviePath)
+                sqlite3_bind_text(stmt, 3, sub.filename, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_int64(stmt, 4, sub.size)
+                bindNullableText(stmt, 5, sub.language)
+                bindNullableText(stmt, 6, sub.descriptor)
+                sqlite3_bind_int(stmt, 7, sub.isSDH ? 1 : 0)
+                sqlite3_bind_int(stmt, 8, sub.isForced ? 1 : 0)
+                sqlite3_bind_text(stmt, 9, sub.format, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_double(stmt, 10, now)
+                guard sqlite3_step(stmt) == SQLITE_DONE else {
+                    throw MovieStoreError.exec(lastErrorMessage())
+                }
+                sqlite3_reset(stmt)
+            }
+
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// Sidecar subtitles attributed to one movie, for the detail sheet.
+    func subtitleFiles(forMoviePath path: String) throws -> [SubtitleFile] {
+        let sql = """
+            SELECT path, movie_path, filename, size, language, descriptor,
+                   is_sdh, is_forced, format
+            FROM subtitle_files
+            WHERE movie_path = ?
+            ORDER BY filename;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+
+        var results: [SubtitleFile] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(SubtitleFile(
+                path: String(cString: sqlite3_column_text(stmt, 0)),
+                moviePath: readNullableText(stmt, 1),
+                filename: String(cString: sqlite3_column_text(stmt, 2)),
+                size: sqlite3_column_int64(stmt, 3),
+                language: readNullableText(stmt, 4),
+                descriptor: readNullableText(stmt, 5),
+                isSDH: sqlite3_column_int(stmt, 6) == 1,
+                isForced: sqlite3_column_int(stmt, 7) == 1,
+                format: String(cString: sqlite3_column_text(stmt, 8))
+            ))
+        }
+        return results
+    }
+
     /// Every persisted movie with full metadata, ordered by filename. Left-
     /// joins the TMDB record to pick up the IMDb ID, the canonical title +
     /// release date payload for the displayed name, then left-joins the
@@ -315,7 +426,10 @@ final class MovieStore {
                    t.imdb_id,
                    r.avg_rating, r.num_votes,
                    t.title, t.release_date, t.release_dates_json,
-                   m.confirmed_year
+                   m.confirmed_year,
+                   m.watched_at, m.personal_rating,
+                   t.genres_json, t.runtime, t.belongs_to_collection_json,
+                   m.first_seen_at, t.poster_path
             FROM movies m
             LEFT JOIN tmdb_movies t ON m.tmdb_id = t.tmdb_id
             LEFT JOIN imdb_ratings r ON t.imdb_id = r.imdb_id
@@ -619,7 +733,105 @@ final class MovieStore {
             movie.tmdbYear = Int(date.prefix(4))
         }
         movie.confirmedYear = readNullableInt(stmt, 33)
+        movie.watchedAt = readNullableDouble(stmt, 34).map { Date(timeIntervalSince1970: $0) }
+        movie.personalRating = readNullableInt(stmt, 35)
+        let genres: [TMDBGenre]? = decodeJSON(readNullableText(stmt, 36))
+        movie.genres = genres?.map(\.name) ?? []
+        movie.runtimeMinutes = readNullableInt(stmt, 37)
+        let collection: TMDBCollection? = decodeJSON(readNullableText(stmt, 38))
+        movie.collectionID = collection?.id
+        movie.collectionName = collection?.name
+        movie.firstSeenAt = readNullableDouble(stmt, 39).map { Date(timeIntervalSince1970: $0) }
+        movie.posterPath = readNullableText(stmt, 40)
         return movie
+    }
+
+    /// Removes a movie row after its file has been deleted from disk —
+    /// keeps the UI honest without waiting for the next full rescan.
+    func deleteMovie(path: String) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "DELETE FROM movies WHERE path = ?;", -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    func deleteSubtitleFile(path: String) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "DELETE FROM subtitle_files WHERE path = ?;", -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// Marks a movie watched (now) or unwatched (nil).
+    func setWatched(path: String, watchedAt: Date?) throws {
+        let sql = "UPDATE movies SET watched_at = ? WHERE path = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindNullableDouble(stmt, 1, watchedAt?.timeIntervalSince1970)
+        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// 1–5 stars, nil to clear.
+    func setPersonalRating(path: String, rating: Int?) throws {
+        let sql = "UPDATE movies SET personal_rating = ? WHERE path = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindNullableInt(stmt, 1, rating.map(Int64.init))
+        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// Every sidecar subtitle row — used by the Reports window for the
+    /// missing-English and VobSub-orphan scans.
+    func allSubtitleFiles() throws -> [SubtitleFile] {
+        let sql = """
+            SELECT path, movie_path, filename, size, language, descriptor,
+                   is_sdh, is_forced, format
+            FROM subtitle_files
+            ORDER BY path;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var results: [SubtitleFile] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(SubtitleFile(
+                path: String(cString: sqlite3_column_text(stmt, 0)),
+                moviePath: readNullableText(stmt, 1),
+                filename: String(cString: sqlite3_column_text(stmt, 2)),
+                size: sqlite3_column_int64(stmt, 3),
+                language: readNullableText(stmt, 4),
+                descriptor: readNullableText(stmt, 5),
+                isSDH: sqlite3_column_int(stmt, 6) == 1,
+                isForced: sqlite3_column_int(stmt, 7) == 1,
+                format: String(cString: sqlite3_column_text(stmt, 8))
+            ))
+        }
+        return results
     }
 
     // MARK: - IMDb dataset

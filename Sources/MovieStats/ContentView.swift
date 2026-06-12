@@ -1,5 +1,6 @@
 import AppKit
 import Charts
+import QuickLook
 import SwiftUI
 
 struct ContentView: View {
@@ -14,6 +15,13 @@ struct ContentView: View {
     @State private var sortMode: SortMode = .sizeDescending
     @State private var selectedTypes: Set<String> = []  // empty = all
     @State private var matchFilter: MatchFilter = .all
+    @State private var watchFilter: WatchFilter = .all
+    @State private var selectedGenres: Set<String> = []  // empty = all
+    @State private var selectedDecades: Set<Int> = []    // empty = all
+    @AppStorage("libraryViewMode") private var viewMode: ViewMode = .list
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var quickLookURL: URL?
+    @State private var dropTargeted = false
     @State private var chatOpen = false
     /// Persisted between launches so the panel re-opens at the user's last
     /// chosen width. Default = `panelMinWidth` so a fresh install opens at
@@ -54,6 +62,10 @@ struct ContentView: View {
     enum SortMode: String, CaseIterable, Identifiable {
         case sizeDescending = "Largest First"
         case titleAscending = "Title A→Z"
+        case ratingDescending = "Highest Rated"
+        case yearDescending = "Newest First"
+        case recentlyAdded = "Recently Added"
+        case recentlyWatched = "Recently Watched"
         var id: String { rawValue }
     }
 
@@ -64,6 +76,17 @@ struct ContentView: View {
         case matched = "Matched"
         case unmatched = "Unmatched"
         var id: String { rawValue }
+    }
+
+    enum WatchFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case watched = "Watched"
+        case unwatched = "Unwatched"
+        var id: String { rawValue }
+    }
+
+    enum ViewMode: String {
+        case list, grid
     }
 
     var body: some View {
@@ -96,7 +119,7 @@ struct ContentView: View {
                 : Self.mainColumnAbsoluteMinWidth,
             minHeight: 380
         )
-        .animation(.easeInOut(duration: 0.22), value: chatOpen)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: chatOpen)
         .background(
             GeometryReader { proxy in
                 Color.clear
@@ -110,7 +133,34 @@ struct ContentView: View {
             let cap = maxPanelWidth
             if panelWidth > cap { panelWidth = cap }
         }
-        .toolbar { toolbarContent }
+        .toolbar(id: "main") { toolbarContent }
+        // Window-wide ⌘F — expands (or refocuses) the list filter field.
+        .background(
+            Button("") {
+                searchExpanded = true
+                searchFocused = true
+            }
+            .keyboardShortcut("f")
+            .opacity(0)
+            .accessibilityHidden(true)
+        )
+        // Dropping a folder anywhere on the window scans it as the library.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first,
+                  (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            else { return false }
+            model.setDirectory(url.path)
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+        .navigationSubtitle(librarySubtitle)
         .sheet(isPresented: Binding(
             get: { model.isScanning || model.isProbing },
             set: { _ in }
@@ -127,12 +177,11 @@ struct ContentView: View {
     }
 
     private var mainColumn: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            header
-
+        VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(spacing: 8) {
                     CompactStatCard(title: "Movies", value: "\(model.movieCount)", systemImage: "film")
+                    CompactStatCard(title: "Unwatched", value: "\(model.unwatchedCount)", systemImage: "eye.slash")
                     CompactStatCard(title: "Over 20 GB", value: "\(model.largeMovieCount)", systemImage: "externaldrive.badge.exclamationmark")
                     CompactStatCard(title: "Total Size", value: byteString(model.totalSize), systemImage: "internaldrive")
                 }
@@ -147,35 +196,6 @@ struct ContentView: View {
             }
             .frame(height: 200)
 
-            if let error = model.lastError {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red)
-                    .font(.callout)
-            }
-
-            movieList
-        }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Subviews
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Movie Stats")
-                .font(.largeTitle.bold())
-            if model.hasDirectory {
-                Text(model.directoryPath)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model.directoryPath)
-            } else {
-                Text("Open a directory to begin scanning for movies.")
-                    .foregroundStyle(.secondary)
-            }
             if !model.ffprobeAvailable {
                 Label(
                     "ffprobe not found — install ffmpeg via Homebrew to detect movie types.",
@@ -184,8 +204,21 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.orange)
             }
+
+            if let error = model.lastError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .font(.callout)
+            }
+
+            movieList
         }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    // MARK: - Subviews
 
     /// Ranked list of every movie, largest first, with its size. The original
     /// size rank is preserved when the search filter narrows the list.
@@ -193,7 +226,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             if model.movies.isEmpty {
                 Spacer()
-                Text(model.hasDirectory ? "No movies found." : "No movies scanned yet.")
+                Text(model.hasDirectory
+                    ? "No movies found."
+                    : "Open a directory (⌘O) or drop a folder here to begin scanning.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                 Spacer()
@@ -202,63 +237,147 @@ struct ContentView: View {
                     Text("Library Details")
                         .font(.headline)
                     Spacer()
+                    viewModePicker
                     sortMenu
-                    typeFilterMenu
-                    matchFilterMenu
+                    filterMenu
                     searchControl
                 }
 
                 let matches = filteredMovies
                 if matches.isEmpty {
                     Spacer()
-                    Text("No matches for \"\(searchText)\".")
+                    Text(searchText.isEmpty ? "No movies match the current filters." : "No matches for \"\(searchText)\".")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
                     Spacer()
+                } else if viewMode == .grid {
+                    movieGrid(matches)
                 } else {
-                    List {
-                        ForEach(matches, id: \.movie.id) { entry in
-                            HStack(spacing: 12) {
-                                Text("\(entry.rank)")
-                                    .font(.callout.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                    .frame(minWidth: 28, alignment: .trailing)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(entry.movie.displayTitle)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                        chips(for: entry.movie)
-                                    }
-                                    Text(entry.movie.path)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-                                Spacer()
-                                Text(byteString(entry.movie.size))
-                                    .font(.callout.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                imdbRatingChip(for: entry.movie)
-                            }
-                            .help(entry.movie.path)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedMovie = entry.movie }
-                            .contextMenu {
-                                Button("Reveal in Finder") {
-                                    NSWorkspace.shared.activateFileViewerSelecting(
-                                        [URL(fileURLWithPath: entry.movie.path)]
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    .listStyle(.inset(alternatesRowBackgrounds: true))
+                    movieRows(matches)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .quickLookPreview($quickLookURL)
+    }
+
+    private func movieRows(_ matches: [(rank: Int, movie: MovieFile)]) -> some View {
+        List {
+            ForEach(matches, id: \.movie.id) { entry in
+                HStack(spacing: 12) {
+                    Text("\(entry.rank)")
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 28, alignment: .trailing)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(entry.movie.displayTitle)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            chips(for: entry.movie)
+                        }
+                        Text(entry.movie.path)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    if entry.movie.watchedAt != nil {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .help(watchedTooltip(entry.movie))
+                    }
+                    personalStars(for: entry.movie)
+                    Text(byteString(entry.movie.size))
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    imdbRatingChip(for: entry.movie)
+                    Button {
+                        ExternalPlayer.play(path: entry.movie.path)
+                    } label: {
+                        Image(systemName: "play.circle")
+                            .imageScale(.large)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Play \(entry.movie.displayTitle)")
+                    .help("Play in \(ExternalPlayer.playerName)")
+                }
+                .help(entry.movie.path)
+                .contentShape(Rectangle())
+                .onTapGesture { selectedMovie = entry.movie }
+                .contextMenu { movieContextMenu(entry.movie) }
+            }
+        }
+        .listStyle(.inset(alternatesRowBackgrounds: true))
+    }
+
+    /// Plex-style poster wall. Same data, filters, and context menu as the
+    /// list — just rendered as cached TMDB posters.
+    private func movieGrid(_ matches: [(rank: Int, movie: MovieFile)]) -> some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 14)],
+                spacing: 14
+            ) {
+                ForEach(matches, id: \.movie.id) { entry in
+                    PosterCard(movie: entry.movie)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedMovie = entry.movie }
+                        .contextMenu { movieContextMenu(entry.movie) }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(entry.movie.displayTitle)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { selectedMovie = entry.movie }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func movieContextMenu(_ movie: MovieFile) -> some View {
+        Button("Play in \(ExternalPlayer.playerName)") {
+            ExternalPlayer.play(path: movie.path)
+        }
+        Button(movie.watchedAt == nil ? "Mark as Watched" : "Mark as Unwatched") {
+            model.setWatched(movie, watched: movie.watchedAt == nil)
+        }
+        Button("Quick Look") {
+            quickLookURL = URL(fileURLWithPath: movie.path)
+        }
+        Button("Reveal in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting(
+                [URL(fileURLWithPath: movie.path)]
+            )
+        }
+        Divider()
+        Button("Copy Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(movie.path, forType: .string)
+        }
+    }
+
+    @ViewBuilder
+    private func personalStars(for movie: MovieFile) -> some View {
+        if let stars = movie.personalRating, stars > 0 {
+            HStack(spacing: 1) {
+                ForEach(1...stars, id: \.self) { _ in
+                    Image(systemName: "star.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Rated \(stars) of 5 stars")
+            .help("Your rating: \(stars)/5")
+        }
+    }
+
+    private func watchedTooltip(_ movie: MovieFile) -> String {
+        guard let date = movie.watchedAt else { return "Watched" }
+        return "Watched \(date.formatted(date: .abbreviated, time: .omitted))"
     }
 
     /// Expand-on-click filter control — collapses to a magnifying glass icon
@@ -288,6 +407,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear filter")
                     .help("Clear filter")
                 }
             }
@@ -295,7 +415,13 @@ struct ContentView: View {
             .padding(.vertical, 5)
             .background(.quaternary.opacity(0.5), in: Capsule())
             .frame(width: 240)
-            .onAppear { searchFocused = true }
+            // Focus must land after the field joins the view hierarchy —
+            // setting it synchronously in onAppear silently fails on macOS.
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    searchFocused = true
+                }
+            }
             .onChange(of: searchFocused) { _, focused in
                 if !focused {
                     searchText = ""
@@ -417,7 +543,26 @@ struct ContentView: View {
             sorted = model.moviesBySize
         case .titleAscending:
             sorted = model.movies.sorted {
-                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
+                $0.sortTitle.localizedStandardCompare($1.sortTitle) == .orderedAscending
+            }
+        case .ratingDescending:
+            // Unrated movies sink to the bottom; size breaks rating ties.
+            sorted = model.movies.sorted {
+                ($0.imdbRating ?? -1, $0.size) > ($1.imdbRating ?? -1, $1.size)
+            }
+        case .yearDescending:
+            sorted = model.movies.sorted {
+                ($0.effectiveYear ?? 0, $0.size) > ($1.effectiveYear ?? 0, $1.size)
+            }
+        case .recentlyAdded:
+            sorted = model.movies.sorted {
+                ($0.firstSeenAt ?? .distantPast) > ($1.firstSeenAt ?? .distantPast)
+            }
+        case .recentlyWatched:
+            // Unwatched movies sink to the bottom in added order.
+            sorted = model.movies.sorted {
+                ($0.watchedAt ?? .distantPast, $0.firstSeenAt ?? .distantPast)
+                    > ($1.watchedAt ?? .distantPast, $1.firstSeenAt ?? .distantPast)
             }
         }
 
@@ -440,13 +585,42 @@ struct ContentView: View {
             matchFiltered = typeFiltered.filter { $0.tmdbId == nil }
         }
 
+        let watchFiltered: [MovieFile]
+        switch watchFilter {
+        case .all:
+            watchFiltered = matchFiltered
+        case .watched:
+            watchFiltered = matchFiltered.filter { $0.watchedAt != nil }
+        case .unwatched:
+            watchFiltered = matchFiltered.filter { $0.watchedAt == nil }
+        }
+
+        let genreFiltered: [MovieFile]
+        if selectedGenres.isEmpty {
+            genreFiltered = watchFiltered
+        } else {
+            genreFiltered = watchFiltered.filter { movie in
+                movie.genres.contains { selectedGenres.contains($0) }
+            }
+        }
+
+        let decadeFiltered: [MovieFile]
+        if selectedDecades.isEmpty {
+            decadeFiltered = genreFiltered
+        } else {
+            decadeFiltered = genreFiltered.filter { movie in
+                guard let year = movie.effectiveYear else { return false }
+                return selectedDecades.contains((year / 10) * 10)
+            }
+        }
+
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let final: [MovieFile]
         if trimmed.isEmpty {
-            final = matchFiltered
+            final = decadeFiltered
         } else {
             let needle = trimmed.lowercased()
-            final = matchFiltered.filter {
+            final = decadeFiltered.filter {
                 $0.displayTitle.lowercased().contains(needle)
                     || $0.filename.lowercased().contains(needle)
             }
@@ -478,75 +652,155 @@ struct ContentView: View {
         .fixedSize()
     }
 
-    /// TMDB-match filter — All / Matched / Unmatched. Single-select; mirrors
-    /// the sort menu's visual style.
-    private var matchFilterMenu: some View {
+    /// List ⟷ poster-wall switch, persisted across launches.
+    private var viewModePicker: some View {
+        Picker("View", selection: $viewMode) {
+            Image(systemName: "list.bullet").tag(ViewMode.list)
+                .help("List")
+            Image(systemName: "square.grid.2x2").tag(ViewMode.grid)
+                .help("Poster wall")
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+    }
+
+    /// All library filters consolidated in a single menu so the controls
+    /// row stays compact as filters accumulate.
+    private var filterMenu: some View {
         Menu {
-            ForEach(MatchFilter.allCases) { option in
-                Button {
-                    matchFilter = option
-                } label: {
-                    if option == matchFilter {
-                        Label(option.rawValue, systemImage: "checkmark")
-                    } else {
-                        Text(option.rawValue)
-                    }
+            Menu("Type") {
+                ForEach(MovieType.allCases, id: \.rawValue) { type in
+                    setToggle(type.rawValue, set: $selectedTypes)
+                }
+                setToggle("Unprobed", set: $selectedTypes)
+            }
+            Menu("Genre") {
+                ForEach(allGenres, id: \.self) { genre in
+                    setToggle(genre, set: $selectedGenres)
                 }
             }
-        } label: {
-            Label("TMDB: \(matchFilter.rawValue)", systemImage: "popcorn")
-                .font(.callout)
-                .labelStyle(.titleAndIcon)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
-
-    /// Multi-select content-type filter. Empty selection = "All Types".
-    private var typeFilterMenu: some View {
-        Menu {
-            Button("All Types") { selectedTypes.removeAll() }
-            Divider()
-            ForEach(MovieType.allCases, id: \.rawValue) { type in
-                typeToggle(type.rawValue)
+            Menu("Decade") {
+                ForEach(allDecades, id: \.self) { decade in
+                    Toggle("\(String(decade))s", isOn: Binding(
+                        get: { selectedDecades.contains(decade) },
+                        set: { on in
+                            if on { selectedDecades.insert(decade) }
+                            else { selectedDecades.remove(decade) }
+                        }
+                    ))
+                }
             }
-            typeToggle("Unprobed")
+            Picker("TMDB Match", selection: $matchFilter) {
+                ForEach(MatchFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Picker("Watched", selection: $watchFilter) {
+                ForEach(WatchFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Divider()
+            Button("Clear All Filters") {
+                selectedTypes.removeAll()
+                selectedGenres.removeAll()
+                selectedDecades.removeAll()
+                matchFilter = .all
+                watchFilter = .all
+            }
+            .disabled(activeFilterCount == 0)
         } label: {
-            Label(typeFilterLabel, systemImage: "line.3.horizontal.decrease.circle")
-                .font(.callout)
-                .labelStyle(.titleAndIcon)
+            Label(
+                activeFilterCount == 0 ? "Filters" : "Filters (\(activeFilterCount))",
+                systemImage: "line.3.horizontal.decrease.circle"
+            )
+            .font(.callout)
+            .labelStyle(.titleAndIcon)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
     }
 
-    @ViewBuilder
-    private func typeToggle(_ name: String) -> some View {
+    private func setToggle(_ name: String, set: Binding<Set<String>>) -> some View {
         Toggle(name, isOn: Binding(
-            get: { selectedTypes.contains(name) },
+            get: { set.wrappedValue.contains(name) },
             set: { on in
-                if on { selectedTypes.insert(name) }
-                else { selectedTypes.remove(name) }
+                if on { set.wrappedValue.insert(name) }
+                else { set.wrappedValue.remove(name) }
             }
         ))
     }
 
-    private var typeFilterLabel: String {
-        if selectedTypes.isEmpty { return "All Types" }
-        if selectedTypes.count == 1 { return selectedTypes.first ?? "1 Type" }
-        return "\(selectedTypes.count) Types"
+    private var activeFilterCount: Int {
+        var count = selectedTypes.count + selectedGenres.count + selectedDecades.count
+        if matchFilter != .all { count += 1 }
+        if watchFilter != .all { count += 1 }
+        return count
+    }
+
+    private var allGenres: [String] {
+        Set(model.movies.flatMap(\.genres)).sorted()
+    }
+
+    private var allDecades: [Int] {
+        Set(model.movies.compactMap { movie in
+            movie.effectiveYear.map { ($0 / 10) * 10 }
+        }).sorted(by: >)
+    }
+
+    /// Customizable (right-click → Customize Toolbar…) toolbar. Every action
+    /// here is also reachable from the Library menu, so removing an item
+    /// never strands the user.
+    @ToolbarContentBuilder
+    private var toolbarContent: some CustomizableToolbarContent {
+        libraryToolbarItems
+        toolWindowToolbarItems
+        analysisToolbarItems
     }
 
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup {
+    private var analysisToolbarItems: some CustomizableToolbarContent {
+        ToolbarItem(id: "reports") {
             Button {
-                openDirectory()
+                openWindow(id: "reports")
+            } label: {
+                Label("Reports", systemImage: "checklist")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Library health reports: missing English subs, upgrade candidates, duplicates, and more")
+        }
+
+        ToolbarItem(id: "collections", showsByDefault: false) {
+            Button {
+                openWindow(id: "collections")
+            } label: {
+                Label("Collections", systemImage: "square.stack.3d.up")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Franchise completeness — what's missing from each TMDB collection you own part of")
+        }
+
+        ToolbarItem(id: "insights") {
+            Button {
+                openWindow(id: "insights")
+            } label: {
+                Label("Insights", systemImage: "chart.bar.xaxis")
+            }
+            .disabled(!model.hasDirectory)
+            .help("Decade, genre, rating, and watch-progress analytics")
+        }
+
+    }
+
+    @ToolbarContentBuilder
+    private var libraryToolbarItems: some CustomizableToolbarContent {
+        ToolbarItem(id: "open-directory") {
+            Button {
+                model.chooseDirectory()
             } label: {
                 Label("Open Directory", systemImage: "folder")
             }
             .help("Choose a directory to scan")
+        }
 
+        ToolbarItem(id: "rescan") {
             Button {
                 Task { await model.rescan() }
             } label: {
@@ -554,7 +808,9 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory || model.isScanning)
             .help("Rescan the current directory")
+        }
 
+        ToolbarItem(id: "reprobe", showsByDefault: false) {
             Button {
                 Task { await model.reprobeAll() }
             } label: {
@@ -562,16 +818,21 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory || model.isScanning || model.isProbing)
             .help("Re-read codec/resolution/HDR for every movie")
+        }
 
-            Spacer()
-
+        ToolbarItem(id: "import") {
             Button {
                 openWindow(id: "import")
             } label: {
                 Label("Import", systemImage: "tray.and.arrow.down")
             }
             .help("Walk a /complete-style folder through TMDB matching, cleanup, rename, and move into the library")
+        }
+    }
 
+    @ToolbarContentBuilder
+    private var toolWindowToolbarItems: some CustomizableToolbarContent {
+        ToolbarItem(id: "scan-images", showsByDefault: false) {
             Button {
                 openWindow(id: CleanupCategory.images.id)
             } label: {
@@ -579,7 +840,9 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Scan this directory for images")
+        }
 
+        ToolbarItem(id: "scan-text", showsByDefault: false) {
             Button {
                 openWindow(id: CleanupCategory.text.id)
             } label: {
@@ -587,7 +850,9 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Scan this directory for .txt and .nfo files")
+        }
 
+        ToolbarItem(id: "duplicates", showsByDefault: false) {
             Button {
                 openWindow(id: "duplicates")
             } label: {
@@ -595,7 +860,9 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Find folders containing more than one video file")
+        }
 
+        ToolbarItem(id: "empty-folders", showsByDefault: false) {
             Button {
                 openWindow(id: "empty-folders")
             } label: {
@@ -603,7 +870,9 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Find folders that contain no files")
+        }
 
+        ToolbarItem(id: "tmdb-matcher") {
             Button {
                 openWindow(id: "tmdb-matcher")
             } label: {
@@ -611,7 +880,9 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Match unmatched movies to TMDB and cache the metadata")
+        }
 
+        ToolbarItem(id: "rename-library") {
             Button {
                 openWindow(id: "rename-library")
             } label: {
@@ -619,40 +890,75 @@ struct ContentView: View {
             }
             .disabled(!model.hasDirectory)
             .help("Rename matched movies into the canonical Plex / Jellyfin folder + filename format")
+        }
 
+        ToolbarItem(id: "imdb-ratings", showsByDefault: false) {
             Button {
                 openWindow(id: "imdb-ratings")
             } label: {
                 Label("IMDb Ratings", systemImage: "star.bubble")
             }
             .help("Download / refresh the IMDb bulk ratings dataset")
+        }
 
+        ToolbarItem(id: "surprise-me") {
             Button {
-                chatOpen.toggle()
+                pickRandomMovie()
             } label: {
-                Label("Query the AI God", systemImage: "sparkles")
+                Label("Surprise Me", systemImage: "dice")
             }
-            .help(chatOpen ? "Close the AI God panel" : "Query the AI God")
+            .disabled(model.movies.isEmpty)
+            .help("Pick something to watch tonight — random, weighted toward unwatched, well-rated movies. Respects the current filters.")
+        }
+
+        ToolbarItem(id: "ask-claude") {
+            if chatModel.hasClaudeCode {
+                Button {
+                    chatOpen.toggle()
+                } label: {
+                    Label("Ask Claude", systemImage: "sparkles")
+                }
+                .help(chatOpen ? "Close the Ask Claude panel" : "Ask Claude about your library")
+            }
         }
     }
 
-    // MARK: - Actions
-
-    private func openDirectory() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Scan"
-        panel.message = "Choose a directory to scan for movies"
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        model.directoryPath = url.path
-        Task { await model.rescan() }
+    /// "What should I watch tonight?" — weighted random pick from the
+    /// currently-filtered movies, preferring unwatched titles and skewing
+    /// toward higher IMDb ratings. Opens the pick's detail sheet.
+    private func pickRandomMovie() {
+        let pool = filteredMovies.map(\.movie)
+        guard !pool.isEmpty else { return }
+        let unwatched = pool.filter { $0.watchedAt == nil }
+        let candidates = unwatched.isEmpty ? pool : unwatched
+        let weighted = candidates.map { ($0, max(($0.imdbRating ?? 6.0) - 4.0, 0.5)) }
+        let total = weighted.reduce(0.0) { $0 + $1.1 }
+        var remaining = Double.random(in: 0..<total)
+        for (movie, weight) in weighted {
+            remaining -= weight
+            if remaining <= 0 {
+                selectedMovie = movie
+                return
+            }
+        }
+        selectedMovie = candidates.last
     }
 
     private func byteString(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    /// Title-bar subtitle: plain text to the left of the toolbar icons —
+    /// counts plus the library path (tilde-abbreviated to keep it short).
+    private var librarySubtitle: String {
+        var parts: [String] = []
+        if model.movieCount > 0 {
+            parts.append("\(model.movieCount) movies · \(byteString(model.totalSize))")
+        }
+        if model.hasDirectory {
+            parts.append((model.directoryPath as NSString).abbreviatingWithTildeInPath)
+        }
+        return parts.joined(separator: " — ")
     }
 }
 
@@ -675,6 +981,11 @@ private struct MovieDetailSheet: View {
 
     @Environment(AppModel.self) private var appModel
     @State private var tmdbState: TMDBState = .idle
+    @State private var externalSubtitles: [SubtitleFile] = []
+    @State private var isWatched = false
+    @State private var personalStars = 0
+    @State private var fetchingTrailer = false
+    @State private var trailerError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -753,6 +1064,11 @@ private struct MovieDetailSheet: View {
                             }
                         }
                     }
+
+                    if !externalSubtitles.isEmpty {
+                        Divider()
+                        externalSubtitlesTable
+                    }
                 }
                 .padding(.vertical, 14)
             }
@@ -760,8 +1076,40 @@ private struct MovieDetailSheet: View {
 
             Divider()
 
-            HStack {
+            HStack(spacing: 14) {
+                Button {
+                    ExternalPlayer.play(path: movie.path)
+                } label: {
+                    Label("Play in \(ExternalPlayer.playerName)", systemImage: "play.fill")
+                }
+                if movie.tmdbId != nil {
+                    Button {
+                        watchTrailer()
+                    } label: {
+                        if fetchingTrailer {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label("Trailer", systemImage: "movieclapper")
+                        }
+                    }
+                    .disabled(fetchingTrailer)
+                    .help("Find this movie's trailer on TMDB and open it on YouTube")
+                }
+                if let trailerError {
+                    Text(trailerError)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 Spacer()
+                Toggle("Watched", isOn: Binding(
+                    get: { isWatched },
+                    set: { on in
+                        isWatched = on
+                        appModel.setWatched(movie, watched: on)
+                    }
+                ))
+                .toggleStyle(.checkbox)
+                starPicker
                 Button("Done") { onClose() }
                     .keyboardShortcut(.defaultAction)
             }
@@ -770,6 +1118,49 @@ private struct MovieDetailSheet: View {
         .padding(28)
         .frame(width: 760)
         .onExitCommand { onClose() }
+        .task(id: movie.id) {
+            isWatched = movie.watchedAt != nil
+            personalStars = movie.personalRating ?? 0
+            guard let store = appModel.store else { return }
+            externalSubtitles = (try? store.subtitleFiles(forMoviePath: movie.path)) ?? []
+        }
+    }
+
+    private func watchTrailer() {
+        guard let tmdbID = movie.tmdbId else { return }
+        fetchingTrailer = true
+        trailerError = nil
+        Task {
+            defer { fetchingTrailer = false }
+            do {
+                if let url = try await TMDBService.trailer(forID: tmdbID)?.youtubeURL {
+                    NSWorkspace.shared.open(url)
+                } else {
+                    trailerError = "No trailer on TMDB."
+                }
+            } catch {
+                trailerError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Click a star to rate 1–5; click the current rating again to clear it.
+    private var starPicker: some View {
+        HStack(spacing: 2) {
+            ForEach(1...5, id: \.self) { star in
+                Button {
+                    let newValue = personalStars == star ? 0 : star
+                    personalStars = newValue
+                    appModel.setPersonalRating(movie, rating: newValue == 0 ? nil : newValue)
+                } label: {
+                    Image(systemName: star <= personalStars ? "star.fill" : "star")
+                        .foregroundStyle(star <= personalStars ? .orange : .secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rate \(star) star\(star == 1 ? "" : "s")")
+            }
+        }
+        .help("Your rating — click the same star again to clear")
     }
 
     // MARK: - Track tables
@@ -843,6 +1234,56 @@ private struct MovieDetailSheet: View {
                 }
             }
         }
+    }
+
+    /// Sidecar subtitle files on disk (from the `subtitle_files` table) —
+    /// distinct from the embedded subtitle *tracks* above.
+    private var externalSubtitlesTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Subtitle Files (\(externalSubtitles.count))")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                GridRow {
+                    Text("#").gridColumnAlignment(.trailing)
+                    Text("Language")
+                    Text("Flags")
+                    Text("Format")
+                    Text("File")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                Divider().gridCellUnsizedAxes(.horizontal)
+
+                ForEach(Array(externalSubtitles.enumerated()), id: \.element.id) { idx, sub in
+                    GridRow {
+                        Text("\(idx + 1)")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Text(sub.language.map { Self.localizedLanguage(code: $0) } ?? "—")
+                        Text(subtitleFlags(sub))
+                        Text(sub.format.uppercased())
+                        Text(sub.filename)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(sub.path)
+                    }
+                    .font(.callout)
+                    .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func subtitleFlags(_ sub: SubtitleFile) -> String {
+        var flags: [String] = []
+        if let descriptor = sub.descriptor { flags.append(descriptor) }
+        if sub.isSDH { flags.append("SDH") }
+        if sub.isForced { flags.append("forced") }
+        return flags.isEmpty ? "—" : flags.joined(separator: ", ")
     }
 
     private func audioChannelText(at idx: Int) -> String {
@@ -936,9 +1377,9 @@ private struct MovieDetailSheet: View {
                         detailRow("Status", status)
                     }
                     if let imdb = detail.imdbID, !imdb.isEmpty {
-                        detailRow("IMDb", imdb)
+                        detailLinkRow("IMDb", imdb, url: "https://www.imdb.com/title/\(imdb)/")
                     }
-                    detailRow("TMDB ID", String(detail.id))
+                    detailLinkRow("TMDB ID", String(detail.id), url: "https://www.themoviedb.org/movie/\(detail.id)")
                 }
 
                 if let overview = detail.overview, !overview.isEmpty {
@@ -981,6 +1422,23 @@ private struct MovieDetailSheet: View {
             Text(value)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func detailLinkRow(_ label: String, _ value: String, url: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+            if let destination = URL(string: url) {
+                Link(value, destination: destination)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(url)
+            } else {
+                Text(value)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -1221,10 +1679,107 @@ private struct ScanProgressSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+
+            HStack {
+                if model.cancelRequested {
+                    Text("Finishing the files already in flight…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") { model.cancelScan() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(model.cancelRequested)
+                    .help("Stop after the files currently being read — already-probed metadata is kept, and the next Rescan resumes from here")
+            }
         }
         .padding(20)
         .frame(width: 480)
         .interactiveDismissDisabled()
+    }
+}
+
+/// One tile in the poster wall: cached TMDB poster (or a placeholder for
+/// unmatched movies), title, year, size, and a watched badge.
+private struct PosterCard: View {
+    let movie: MovieFile
+    @State private var posterImage: NSImage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack(alignment: .topTrailing) {
+                poster
+                    .aspectRatio(2 / 3, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                if movie.watchedAt != nil {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.white, .green)
+                        .padding(6)
+                        .help("Watched")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(movie.displayTitle)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 6) {
+                    Text(ByteCountFormatter.string(fromByteCount: movie.size, countStyle: .file))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let rating = movie.imdbRating {
+                        HStack(spacing: 2) {
+                            Image(systemName: "star.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.yellow)
+                            Text(String(format: "%.1f", rating))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .help(movie.path)
+        .task(id: movie.id) {
+            guard let id = movie.tmdbId else { return }
+            posterImage = PosterCache.loadPoster(forTMDBID: id)
+            // Matches confirmed before poster caching existed have no local
+            // artwork — fetch lazily as the cell scrolls into view.
+            if posterImage == nil, let path = movie.posterPath {
+                if await PosterCache.downloadIfNeeded(tmdbID: id, posterPath: path) {
+                    posterImage = PosterCache.loadPoster(forTMDBID: id)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var poster: some View {
+        if let image = posterImage {
+            Image(nsImage: image)
+                .resizable()
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.quaternary.opacity(0.6))
+                VStack(spacing: 8) {
+                    Image(systemName: "film")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text(movie.displayTitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .padding(.horizontal, 8)
+                }
+            }
+        }
     }
 }
 

@@ -19,6 +19,7 @@ struct ImportView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var session: ImportSession?
+    @State private var showReplaceConfirm = false
 
     /// Outer frame defaults for the wizard window. The matcher and
     /// rename inner panels happily fill more space, so we go large.
@@ -254,6 +255,8 @@ struct ImportView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            duplicatesSection(session: session)
+
             // Auto-prune toggle — opt-in because the deletion is
             // permanent on network volumes (no Trash). The session's
             // guard only fires when the source has no non-hidden
@@ -297,7 +300,11 @@ struct ImportView: View {
                         .frame(width: 240)
                 }
                 Button {
-                    Task { await session.moveToLibrary() }
+                    if session.duplicateConflicts.isEmpty {
+                        Task { await session.moveToLibrary() }
+                    } else {
+                        showReplaceConfirm = true
+                    }
                 } label: {
                     Label("Move to Library", systemImage: "tray.and.arrow.up")
                         .font(.body.weight(.semibold))
@@ -308,6 +315,77 @@ struct ImportView: View {
             }
         }
         .padding(20)
+        .confirmationDialog(
+            replaceDialogTitle(session: session),
+            isPresented: $showReplaceConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Replace and Move", role: .destructive) {
+                Task {
+                    await session.replaceExistingCopies()
+                    await session.moveToLibrary()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The library's current copies — each video, its subtitles, and its folder — are permanently deleted, then the imported versions move in. Files are not sent to the Trash.")
+        }
+    }
+
+    private func replaceDialogTitle(session: ImportSession) -> String {
+        let existingCount = session.duplicateConflicts.reduce(0) { $0 + $1.existing.count }
+        return "Replace \(existingCount) existing cop\(existingCount == 1 ? "y" : "ies") in the library?"
+    }
+
+    /// Warning block on the Ready step listing imported movies that are
+    /// already in the library (same TMDB id), with the existing copy's
+    /// location and size so the user can judge which version wins.
+    @ViewBuilder
+    private func duplicatesSection(session: ImportSession) -> some View {
+        let conflicts = session.duplicateConflicts
+        if !conflicts.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(
+                    "\(conflicts.count) of the imported movies \(conflicts.count == 1 ? "is" : "are") already in the library",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.orange)
+
+                ForEach(conflicts) { conflict in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(conflict.imported.displayTitle)
+                            .font(.callout.weight(.medium))
+                        ForEach(conflict.existing, id: \.path) { existing in
+                            HStack(spacing: 6) {
+                                Text("library copy:")
+                                    .foregroundStyle(.secondary)
+                                Text(existing.path)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help(existing.path)
+                                Text(ByteCountFormatter.string(fromByteCount: existing.size, countStyle: .file))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                                if let type = existing.movieType {
+                                    Text(type)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .font(.caption)
+                        }
+                    }
+                    .padding(.leading, 22)
+                }
+
+                Text("Move to Library will ask whether to replace the existing copies (permanently deleting the old video, its subtitles, and its folder) or cancel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 22)
+            }
+            .padding(10)
+            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        }
     }
 
     @ViewBuilder
