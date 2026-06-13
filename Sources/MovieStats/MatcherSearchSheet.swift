@@ -19,6 +19,11 @@ struct MatcherSearchSheet: View {
     @State private var results: [TMDBMovie] = []
     @State private var isSearching = false
     @State private var lastError: String?
+    /// The TMDB id of the candidate the user has clicked but not yet
+    /// committed — drives row highlight + Accept-button enable. Reset
+    /// whenever a new search runs so a stale id from a previous query
+    /// can't smuggle itself into the commit.
+    @State private var selectedID: Int?
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -70,7 +75,6 @@ struct MatcherSearchSheet: View {
             Button("Search") {
                 Task { await runSearch() }
             }
-            .keyboardShortcut(.return, modifiers: [])
             .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || isSearching)
         }
         .padding(.horizontal, 14)
@@ -125,7 +129,7 @@ struct MatcherSearchSheet: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(results) { result in
-                        resultRow(result)
+                        resultRow(result, isSelected: result.id == selectedID)
                         Divider()
                     }
                 }
@@ -133,10 +137,9 @@ struct MatcherSearchSheet: View {
         }
     }
 
-    private func resultRow(_ result: TMDBMovie) -> some View {
+    private func resultRow(_ result: TMDBMovie, isSelected: Bool) -> some View {
         Button {
-            let trimmed = customEdition.trimmingCharacters(in: .whitespacesAndNewlines)
-            onPick(result, trimmed.isEmpty ? nil : trimmed)
+            selectedID = result.id
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -171,9 +174,30 @@ struct MatcherSearchSheet: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+            .overlay(alignment: .leading) {
+                if isSelected {
+                    Rectangle()
+                        .fill(Color.accentColor)
+                        .frame(width: 3)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Commits the user's highlighted candidate to the caller via
+    /// `onPick`. Fires from the Accept button and from Return when a
+    /// row is highlighted. Trims the custom edition; empty / pure-
+    /// whitespace becomes nil so the renamer skips the
+    /// `{edition-X}` block.
+    private func acceptSelection() {
+        guard let id = selectedID,
+              let pick = results.first(where: { $0.id == id })
+        else { return }
+        let trimmed = customEdition.trimmingCharacters(in: .whitespacesAndNewlines)
+        onPick(pick, trimmed.isEmpty ? nil : trimmed)
     }
 
     private var footer: some View {
@@ -181,6 +205,13 @@ struct MatcherSearchSheet: View {
             Spacer()
             Button("Cancel") { onCancel() }
                 .keyboardShortcut(.cancelAction)
+            Button("Accept") { acceptSelection() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(selectedID == nil)
+                .help(selectedID == nil
+                      ? "Click a result above to choose it, then Accept."
+                      : "Record this TMDB match and close.")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -193,9 +224,18 @@ struct MatcherSearchSheet: View {
         guard !trimmed.isEmpty else { return }
         isSearching = true
         lastError = nil
+        selectedID = nil
         defer { isSearching = false }
         do {
             results = try await TMDBService.searchMovies(title: trimmed, year: nil)
+            // Preselect the row's existing candidate if it's still in
+            // the result set. Lets a user who only meant to tweak the
+            // custom edition hit Accept without re-clicking the row.
+            if let existing = row.candidate?.id,
+               results.contains(where: { $0.id == existing })
+            {
+                selectedID = existing
+            }
         } catch {
             results = []
             lastError = error.localizedDescription

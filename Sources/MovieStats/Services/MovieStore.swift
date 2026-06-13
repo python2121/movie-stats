@@ -195,6 +195,24 @@ final class MovieStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_subtitle_files_movie ON subtitle_files(movie_path);")
 
+        // Auxiliary video files (deleted scenes, featurettes, etc.)
+        // the user routed into a movie's Other/ folder during the
+        // import wizard's Multiple Videos step. Path is keyed against
+        // the file's *final* library location so a future rescan can
+        // recognize the row by where it lives.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS extras (
+                path              TEXT PRIMARY KEY,
+                parent_movie_path TEXT,
+                parent_tmdb_id    INTEGER,
+                category          TEXT NOT NULL,
+                filename          TEXT NOT NULL,
+                size              INTEGER NOT NULL,
+                added_at          REAL NOT NULL
+            );
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_extras_parent ON extras(parent_movie_path);")
+
         if needsTitleBackfill {
             try backfillParsedTitles()
         }
@@ -792,6 +810,114 @@ final class MovieStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw MovieStoreError.exec(lastErrorMessage())
         }
+    }
+
+    // MARK: - Extras
+
+    /// Insert-or-replace one row in `extras`. `path` is the unique
+    /// key; re-importing the same file updates the surrounding
+    /// columns. The `added_at` stamp passed in survives reinserts —
+    /// callers preserve the original when relevant.
+    func addExtra(_ extra: ExtraFile) throws {
+        let sql = """
+            INSERT OR REPLACE INTO extras
+                (path, parent_movie_path, parent_tmdb_id, category,
+                 filename, size, added_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, extra.path, -1, SQLITE_TRANSIENT)
+        if let parent = extra.parentMoviePath {
+            sqlite3_bind_text(stmt, 2, parent, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 2)
+        }
+        if let tmdb = extra.parentTMDBId {
+            sqlite3_bind_int(stmt, 3, Int32(tmdb))
+        } else {
+            sqlite3_bind_null(stmt, 3)
+        }
+        sqlite3_bind_text(stmt, 4, extra.category, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 5, extra.filename, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(stmt, 6, extra.size)
+        sqlite3_bind_double(stmt, 7, extra.addedAt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// Every recorded extra, ordered by parent path then filename so
+    /// extras for the same movie cluster together.
+    func allExtras() throws -> [ExtraFile] {
+        try queryExtras(
+            sql: """
+                SELECT path, parent_movie_path, parent_tmdb_id,
+                       category, filename, size, added_at
+                FROM extras
+                ORDER BY parent_movie_path, filename;
+                """,
+            bind: { _ in }
+        )
+    }
+
+    /// Extras attributed to one specific movie path.
+    func extras(forMoviePath path: String) throws -> [ExtraFile] {
+        try queryExtras(
+            sql: """
+                SELECT path, parent_movie_path, parent_tmdb_id,
+                       category, filename, size, added_at
+                FROM extras
+                WHERE parent_movie_path = ?
+                ORDER BY filename;
+                """,
+            bind: { stmt in
+                sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+            }
+        )
+    }
+
+    func deleteExtra(path: String) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "DELETE FROM extras WHERE path = ?;", -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw MovieStoreError.exec(lastErrorMessage())
+        }
+    }
+
+    /// Shared prepare + step + decode for the two extras SELECTs.
+    private func queryExtras(
+        sql: String,
+        bind: (OpaquePointer?) -> Void
+    ) throws -> [ExtraFile] {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw MovieStoreError.prepare(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt)
+        var results: [ExtraFile] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let parentTMDB: Int? = sqlite3_column_type(stmt, 2) == SQLITE_NULL
+                ? nil : Int(sqlite3_column_int(stmt, 2))
+            results.append(ExtraFile(
+                path: String(cString: sqlite3_column_text(stmt, 0)),
+                parentMoviePath: readNullableText(stmt, 1),
+                parentTMDBId: parentTMDB,
+                category: String(cString: sqlite3_column_text(stmt, 3)),
+                filename: String(cString: sqlite3_column_text(stmt, 4)),
+                size: sqlite3_column_int64(stmt, 5),
+                addedAt: sqlite3_column_double(stmt, 6)
+            ))
+        }
+        return results
     }
 
     /// Marks a movie watched (now) or unwatched (nil).

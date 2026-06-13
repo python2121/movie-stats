@@ -1,5 +1,21 @@
 import SwiftUI
 
+/// Wires the import wizard's "Mark as Extra" behavior into
+/// `DuplicatesView` without making the standalone Multiple-Videos
+/// tool know about import sessions. Set by `ImportView` only; nil
+/// for the standalone window.
+struct DuplicatesExtrasConfig {
+    /// True iff the file is eligible to be marked Extra — typically
+    /// "has a TMDB-matched larger sibling in the same bucket." Drives
+    /// whether the Extra checkbox renders for this row.
+    var isMarkable: (ScannedFile) -> Bool
+    /// Whether the user has currently checked Extra for this file.
+    var isMarked: (ScannedFile) -> Bool
+    /// Toggle the Extra mark. The view layers mutual exclusion with
+    /// the delete checkbox on top — that logic doesn't live here.
+    var setMarked: (ScannedFile, Bool) -> Void
+}
+
 /// A window that lists folders containing more than one video file. Videos are
 /// grouped under their top-level folder (even when nested in different
 /// subfolders) so it's clear which belong together. Checked videos can be
@@ -17,6 +33,10 @@ struct DuplicatesView: View {
     /// "The.Cast.Remembers.mkv") are exactly what the user wants to
     /// see and prune from.
     let includeRootLevel: Bool
+    /// Optional Extras-column plumbing. nil in the standalone window
+    /// (no Extra column rendered); non-nil when embedded in the
+    /// import wizard's Multiple Videos step.
+    let extrasConfig: DuplicatesExtrasConfig?
 
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -24,10 +44,16 @@ struct DuplicatesView: View {
     @State private var model = DuplicatesModel()
     @State private var confirmingDelete = false
 
-    init(scopedDirectory: String? = nil, embedded: Bool = false, includeRootLevel: Bool = false) {
+    init(
+        scopedDirectory: String? = nil,
+        embedded: Bool = false,
+        includeRootLevel: Bool = false,
+        extrasConfig: DuplicatesExtrasConfig? = nil
+    ) {
         self.scopedDirectory = scopedDirectory
         self.embedded = embedded
         self.includeRootLevel = includeRootLevel
+        self.extrasConfig = extrasConfig
     }
 
     private var directory: String {
@@ -131,6 +157,7 @@ struct DuplicatesView: View {
         HStack(spacing: 12) {
             Toggle("", isOn: selectionBinding(for: file))
                 .labelsHidden()
+                .help("Permanently delete this file when you click Delete Selected.")
             VStack(alignment: .leading, spacing: 2) {
                 Text(file.filename)
                     .lineLimit(1)
@@ -142,11 +169,32 @@ struct DuplicatesView: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            if let config = extrasConfig {
+                extraCell(for: file, config: config)
+            }
             Text(byteString(file.size))
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
         .help(file.path)
+    }
+
+    /// Per-row "Mark as Extra" cell. Rendered only in import-wizard
+    /// mode (when `extrasConfig` is non-nil). Eligible rows (those
+    /// with a TMDB-matched larger sibling in the same bucket) show a
+    /// checkbox bound through the config; ineligible rows render a
+    /// dimmed dash with a tooltip explaining why.
+    @ViewBuilder
+    private func extraCell(for file: ScannedFile, config: DuplicatesExtrasConfig) -> some View {
+        if config.isMarkable(file) {
+            Toggle("Extra", isOn: extrasBinding(for: file, config: config))
+                .toggleStyle(.checkbox)
+                .help("Move this file into the parent movie's `Other/` subfolder when the import completes, and record it in the library database. Mutually exclusive with the Delete checkbox.")
+        } else {
+            Text("—")
+                .foregroundStyle(.tertiary)
+                .help("Mark a TMDB-matched movie as the largest video in this bucket first, then smaller siblings can be flagged as Extras.")
+        }
     }
 
     private var footer: some View {
@@ -191,7 +239,26 @@ struct DuplicatesView: View {
             set: { isOn in
                 if isOn {
                     model.selection.insert(file.path)
+                    // Mutual exclusion: marking for deletion clears
+                    // any Extra mark (a deleted file can't also be
+                    // routed to Other/).
+                    extrasConfig?.setMarked(file, false)
                 } else {
+                    model.selection.remove(file.path)
+                }
+            }
+        )
+    }
+
+    /// Two-way binding for the per-row Extra checkbox. Mirrors the
+    /// selection binding's mutual-exclusion contract — checking Extra
+    /// clears the delete selection for the same file.
+    private func extrasBinding(for file: ScannedFile, config: DuplicatesExtrasConfig) -> Binding<Bool> {
+        Binding(
+            get: { config.isMarked(file) },
+            set: { isOn in
+                config.setMarked(file, isOn)
+                if isOn {
                     model.selection.remove(file.path)
                 }
             }

@@ -101,6 +101,49 @@ struct ImportView: View {
         )
     }
 
+    /// Builds the DuplicatesView's Extras-column plumbing from the
+    /// session. Eligibility: this file has a TMDB-matched larger
+    /// sibling in the same bucket (the "parent movie"). Toggling
+    /// writes through to `session.extrasMarks` so the relocation at
+    /// Move-to-Library time sees the user's choices.
+    private func makeExtrasConfig(session: ImportSession) -> DuplicatesExtrasConfig {
+        return DuplicatesExtrasConfig(
+            isMarkable: { file in
+                session.parentMovie(forSourcePath: file.path) != nil
+            },
+            isMarked: { file in session.extrasMarks[file.path] != nil },
+            setMarked: { file, value in
+                guard value else {
+                    session.setExtraMark(nil, forPath: file.path)
+                    return
+                }
+                guard let parent = session.parentMovie(forSourcePath: file.path),
+                      let tmdbId = parent.tmdbId
+                else { return }
+                // bucketIsSourceRoot: true iff this file lives loose
+                // at the source root (no folder between it and the
+                // source directory). Drives the dual-location lookup
+                // when `relocateMarkedExtras` runs.
+                let sourcePrefix = session.directoryPath.hasSuffix("/")
+                    ? session.directoryPath
+                    : session.directoryPath + "/"
+                let relative = file.path.hasPrefix(sourcePrefix)
+                    ? String(file.path.dropFirst(sourcePrefix.count))
+                    : file.path
+                let bucketIsSourceRoot = !relative.contains("/")
+                session.setExtraMark(
+                    ImportSession.ExtraMark(
+                        filename: file.filename,
+                        size: file.size,
+                        parentTMDBId: tmdbId,
+                        bucketIsSourceRoot: bucketIsSourceRoot
+                    ),
+                    forPath: file.path
+                )
+            }
+        )
+    }
+
     /// Handler for the wizard footer's Next button. Adds a Match-step
     /// guard: if the user marked any Replace boxes, surface a
     /// confirmation dialog itemizing what'll be deleted before letting
@@ -230,11 +273,12 @@ struct ImportView: View {
                 FileCleanupView(category: .text, scopedDirectory: session.sourceDirectory, embedded: true)
             }
         case .multiVideo:
-            embeddedSection(title: "Every video file in the source, grouped by its parent folder (loose ones at the source root form their own group). The main movie usually sits at the top — check anything else you'd consider an extra and delete it.") {
+            embeddedSection(title: "Every video file in the source, grouped by its parent folder (loose ones at the source root form their own group). The main movie usually sits at the top. Check anything else for **Delete** to prune, or **Extra** to keep it as bonus content under the movie's `Other/` folder.") {
                 DuplicatesView(
                     scopedDirectory: session.sourceDirectory,
                     embedded: true,
-                    includeRootLevel: true
+                    includeRootLevel: true,
+                    extrasConfig: makeExtrasConfig(session: session)
                 )
             }
         case .emptyFolders:
