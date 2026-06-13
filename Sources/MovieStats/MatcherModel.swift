@@ -169,17 +169,20 @@ final class MatcherModel {
         self.autoCommitOnPick = autoCommitOnPick
     }
 
-    /// Writes the row's current candidate/edition through to the
-    /// scope when auto-commit is on. Bridges the gap between a
-    /// pending pick and the explicit-Confirm commit so downstream
-    /// surfaces (import wizard's Replace + Extra eligibility) see
-    /// the match without an intermediate user action.
+    /// Writes the row's current `(candidate, edition, included)`
+    /// state through to the scope when auto-commit is on. Bridges
+    /// the gap between a pending pick and the explicit-Confirm
+    /// commit so downstream surfaces (import wizard's Replace +
+    /// Extra eligibility) see the match without an intermediate user
+    /// action. A row with no candidate — OR a candidate but
+    /// `included = false` — writes a nil tmdbId, mirroring the
+    /// standalone matcher's "uncommitted unless included" rule.
     private func commitToScopeIfAutoMode(rowID: Row.ID) {
         guard autoCommitOnPick,
               let idx = rows.firstIndex(where: { $0.id == rowID })
         else { return }
         let row = rows[idx]
-        if let candidate = row.candidate {
+        if row.included, let candidate = row.candidate {
             // Year sourced from the candidate's search-endpoint year;
             // `confirm()` later refines this with the
             // release_dates-derived preferredReleaseDate.
@@ -191,8 +194,10 @@ final class MatcherModel {
                 customEdition: row.customEdition
             )
         } else {
-            // Cleared candidate — remove the match from the scope so
-            // a stale tmdbId can't survive on session.movies.
+            // Either no candidate or the user opted out via the
+            // Include toggle — remove any previously-written match
+            // from the scope so a stale tmdbId can't survive on
+            // session.movies.
             try? scope.setTMDBMatch(
                 forPath: row.path,
                 tmdbID: nil,
@@ -370,6 +375,7 @@ final class MatcherModel {
     func setIncluded(_ included: Bool, for rowID: Row.ID) {
         guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return }
         rows[idx].included = included
+        commitToScopeIfAutoMode(rowID: rowID)
     }
 
     /// Bulk include/exclude — only touches rows that actually have a
@@ -377,6 +383,7 @@ final class MatcherModel {
     func setAllIncluded(_ included: Bool) {
         for idx in rows.indices where rows[idx].candidate != nil {
             rows[idx].included = included
+            commitToScopeIfAutoMode(rowID: rows[idx].id)
         }
     }
 

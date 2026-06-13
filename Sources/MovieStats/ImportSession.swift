@@ -334,23 +334,28 @@ final class ImportSession: MovieScope {
 
     /// One entry in `extrasMarks`. Captures enough to relocate the file
     /// at Move-to-Library time without depending on a stable path —
-    /// the rename step may have moved the file or its parent folder
-    /// between marking and move.
+    /// the rename step may have renamed the parent folder, or
+    /// (in createFolderAndMove cases) moved the main into a new
+    /// wrapper while leaving the extra where it was.
     struct ExtraMark: Hashable {
-        /// File basename used to discover the file at move time.
+        /// File basename. Becomes the final filename inside `Other/`.
         var filename: String
         /// Total file size at marking time. Used for the DB record
         /// after the move completes (cheaper than re-statting).
         var size: Int64
-        /// TMDB id of the parent movie (the largest matched video in
-        /// the same bucket at marking time). The parent's TMDB id
+        /// TMDB id of the parent movie. The parent's TMDB id
         /// survives the rename step where path strings do not.
         var parentTMDBId: Int
-        /// True iff the file was loose at the source root (no
-        /// containing folder under `sourceDirectory`). Drives the
-        /// dual lookup at move time: parent's wrapper for bucketed
-        /// extras, source root for loose ones.
-        var bucketIsSourceRoot: Bool
+        /// The extra's path relative to the parent movie's
+        /// containing folder, captured at marking time. A sibling
+        /// extra has just the basename (e.g. `Making-Of.mkv`); a
+        /// nested extra has the in-between folders too (e.g.
+        /// `Extras-Grym/Doc.mkv`). At move-time we resolve this
+        /// against the parent's *current* folder first; if missing,
+        /// we fall back to the source root (covers
+        /// createFolderAndMove cases where the main moved into a
+        /// new wrapper but the extra stayed put).
+        var relativeToParentDir: String
     }
 
     /// Files the user checked as "Extra" in the Multiple Videos step,
@@ -371,35 +376,41 @@ final class ImportSession: MovieScope {
         }
     }
 
-    /// Convenience: returns the largest-by-size movie in the same
-    /// first-path-component bucket as `file`. Used by the Duplicates
-    /// view's Extra-config to identify each row's parent — the
-    /// largest matched video is the "main" movie for that bucket.
-    /// Returns nil when no matched larger sibling exists (the row
-    /// itself is the largest, or no sibling has a TMDB id).
+    /// Identifies the parent movie for a candidate-extra path. Uses
+    /// **directory ancestry**: a matched movie is a parent iff its
+    /// containing folder is an ancestor of (or equal to) the extra's
+    /// containing folder. That handles all the natural layouts —
+    /// sibling-of-main, dedicated `Extras/` subfolder, and
+    /// parent-dir-with-multiple-release-folders — without forcing
+    /// the user to think about buckets.
+    ///
+    /// When multiple matched movies qualify (e.g. nested release
+    /// folders), the deepest match wins so the user gets attached
+    /// to the most specific main; ties broken by file size so the
+    /// chunkier video wins. Returns nil when no matched ancestor
+    /// exists (the row IS the main, or no main is matched yet).
     func parentMovie(forSourcePath path: String) -> MovieFile? {
         guard !sourceDirectory.isEmpty else { return nil }
         let sourcePrefix = sourceDirectory.hasSuffix("/")
             ? sourceDirectory : sourceDirectory + "/"
         guard path.hasPrefix(sourcePrefix) else { return nil }
-        let relative = String(path.dropFirst(sourcePrefix.count))
-        let firstComponent: String
-        if let slash = relative.firstIndex(of: "/") {
-            firstComponent = String(relative[..<slash])
-        } else {
-            firstComponent = ""   // file is loose at source root
-        }
+        let extraDir = (path as NSString).deletingLastPathComponent
         let candidates = movies.filter { movie in
             guard movie.path.hasPrefix(sourcePrefix),
                   movie.path != path,
                   movie.tmdbId != nil
             else { return false }
-            let rel = String(movie.path.dropFirst(sourcePrefix.count))
-            let comp = rel.firstIndex(of: "/")
-                .map { String(rel[..<$0]) } ?? ""
-            return comp == firstComponent
+            let mainDir = (movie.path as NSString).deletingLastPathComponent
+            if extraDir == mainDir { return true }
+            let mainDirPrefix = mainDir.hasSuffix("/") ? mainDir : mainDir + "/"
+            return extraDir.hasPrefix(mainDirPrefix)
         }
-        return candidates.max(by: { $0.size < $1.size })
+        return candidates.max(by: { a, b in
+            let aDepth = a.path.filter { $0 == "/" }.count
+            let bDepth = b.path.filter { $0 == "/" }.count
+            if aDepth != bDepth { return aDepth < bDepth }
+            return a.size < b.size
+        })
     }
 
     // MARK: - Step 7: Move to Library
@@ -610,26 +621,24 @@ final class ImportSession: MovieScope {
         var relocations: [ExtrasRelocation] = []
         var failures: [String] = []
 
-        for (_, mark) in extrasMarks {
+        for (markedPath, mark) in extrasMarks {
             guard let parent = parentByTMDB[mark.parentTMDBId] else {
                 failures.append("\(mark.filename): parent movie no longer in this import")
                 continue
             }
             let parentDir = (parent.path as NSString).deletingLastPathComponent
-            // Two possible homes: source root (loose extras) or
-            // parent's current directory (bucketed extras whose
-            // wrapper may have been renamed). Order tried by which
-            // bucket the user marked from, with the other one as a
-            // fallback.
-            let primary: String
-            let secondary: String
-            if mark.bucketIsSourceRoot {
-                primary = (sourceRoot as NSString).appendingPathComponent(mark.filename)
-                secondary = (parentDir as NSString).appendingPathComponent(mark.filename)
-            } else {
-                primary = (parentDir as NSString).appendingPathComponent(mark.filename)
-                secondary = (sourceRoot as NSString).appendingPathComponent(mark.filename)
-            }
+            // Discovery order: parent's *current* directory first
+            // (covers renameFolder, where the extra travelled inside
+            // a renamed wrapper) then source root (covers
+            // createFolderAndMove, where the main moved into a new
+            // wrapper but the extra stayed where the user dropped
+            // it). `relativeToParentDir` carries any intermediate
+            // folders (e.g. `Extras-Grym/Doc.mkv`) so nested
+            // extras-folders resolve in either home.
+            let primary = (parentDir as NSString)
+                .appendingPathComponent(mark.relativeToParentDir)
+            let secondary = (sourceRoot as NSString)
+                .appendingPathComponent(mark.relativeToParentDir)
             let currentExtra: String
             if fm.fileExists(atPath: primary) {
                 currentExtra = primary
@@ -653,8 +662,8 @@ final class ImportSession: MovieScope {
                 }
             }
             let target = (otherDir as NSString).appendingPathComponent(mark.filename)
-            // Idempotency: if the user reran the wizard and the extra
-            // is already in place, treat the no-op as success.
+            // Idempotency: if the extra is already at the canonical
+            // target, treat the no-op as success.
             if currentExtra == target {
                 relocations.append(ExtrasRelocation(
                     sourceAfterMove: target,
@@ -663,6 +672,7 @@ final class ImportSession: MovieScope {
                     filename: mark.filename,
                     size: mark.size
                 ))
+                patchMovieAfterRelocation(markedPath: markedPath, target: target)
                 continue
             }
             if fm.fileExists(atPath: target) {
@@ -682,6 +692,13 @@ final class ImportSession: MovieScope {
                 filename: mark.filename,
                 size: mark.size
             ))
+            // Patch session.movies so the move-to-library loop's
+            // `itemsToMove` set doesn't see a stale pre-relocation
+            // path. Without this, the loop produces a spurious
+            // "doesn't exist" failure for the extra's old first-
+            // path-component even though the data lands correctly
+            // inside the wrapper.
+            patchMovieAfterRelocation(markedPath: markedPath, target: target)
         }
 
         if !failures.isEmpty {
@@ -690,6 +707,20 @@ final class ImportSession: MovieScope {
                 + failures.joined(separator: "\n")
         }
         return relocations
+    }
+
+    /// Updates a relocated extra's in-memory `MovieFile` entry so
+    /// downstream consumers (especially the move-to-library
+    /// `itemsToMove` set) compute the right first-path-component
+    /// from the post-relocation path. Looks the entry up by the
+    /// marking-time path — that's still what session.movies holds
+    /// for unmatched files, since the rename engine only patches
+    /// matched rows.
+    private func patchMovieAfterRelocation(markedPath: String, target: String) {
+        guard let idx = movies.firstIndex(where: { $0.path == markedPath })
+        else { return }
+        movies[idx].path = target
+        movies[idx].filename = (target as NSString).lastPathComponent
     }
 
     /// Persists each relocated extra to the `extras` table under its

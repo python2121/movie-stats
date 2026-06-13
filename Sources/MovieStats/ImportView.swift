@@ -155,23 +155,36 @@ struct ImportView: View {
                 guard let parent = session.parentMovie(forSourcePath: file.path),
                       let tmdbId = parent.tmdbId
                 else { return }
-                // bucketIsSourceRoot: true iff this file lives loose
-                // at the source root (no folder between it and the
-                // source directory). Drives the dual-location lookup
-                // when `relocateMarkedExtras` runs.
-                let sourcePrefix = session.directoryPath.hasSuffix("/")
-                    ? session.directoryPath
-                    : session.directoryPath + "/"
-                let relative = file.path.hasPrefix(sourcePrefix)
-                    ? String(file.path.dropFirst(sourcePrefix.count))
-                    : file.path
-                let bucketIsSourceRoot = !relative.contains("/")
+                // Capture the extra's path *relative to the parent's
+                // containing folder* so move-time discovery works
+                // whether the file is a sibling-of-main
+                // (`Making-Of.mkv`), nested in an extras subfolder
+                // (`Extras-Grym/Doc.mkv`), or whatever the release
+                // shipped.
+                let parentDir = (parent.path as NSString).deletingLastPathComponent
+                let parentDirPrefix = parentDir.hasSuffix("/")
+                    ? parentDir : parentDir + "/"
+                let relativeToParentDir: String
+                if file.path.hasPrefix(parentDirPrefix) {
+                    relativeToParentDir = String(
+                        file.path.dropFirst(parentDirPrefix.count)
+                    )
+                } else {
+                    // Defensive: the ancestor check in
+                    // `parentMovie` should keep us in the
+                    // parent's subtree, but if a future caller
+                    // returns a non-ancestor parent we still
+                    // fall back to the basename so move-time
+                    // discovery finds the file via the source-
+                    // root secondary lookup.
+                    relativeToParentDir = file.filename
+                }
                 session.setExtraMark(
                     ImportSession.ExtraMark(
                         filename: file.filename,
                         size: file.size,
                         parentTMDBId: tmdbId,
-                        bucketIsSourceRoot: bucketIsSourceRoot
+                        relativeToParentDir: relativeToParentDir
                     ),
                     forPath: file.path
                 )
