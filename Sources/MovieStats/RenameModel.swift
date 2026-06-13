@@ -656,25 +656,44 @@ final class RenameModel {
             do {
                 switch row.plan {
                 case .createFolderAndMove:
-                    if fm.fileExists(atPath: row.newFolderPath) {
-                        throw RenameError.targetFolderExists(row.newFolderPath)
-                    }
+                    // The wrapper may pre-exist for any of three
+                    // reasons: a sibling part-row in this same pass
+                    // already created it, a previous partial apply
+                    // landed disc 1 and we're rerunning to finish
+                    // disc 2, or the user re-imported into an
+                    // already-canonical layout. All three are
+                    // idempotent — the {tmdb-N} tag makes wrapper
+                    // names unique-per-movie, so any wrapper at this
+                    // path is for *this* movie. createDirectory is a
+                    // no-op when the folder exists and
+                    // `withIntermediateDirectories: true`; the
+                    // moveItem below catches genuine file-level
+                    // collisions.
                     try fm.createDirectory(
                         atPath: row.newFolderPath,
-                        withIntermediateDirectories: false
+                        withIntermediateDirectories: true
                     )
                     try fm.moveItem(atPath: row.path, toPath: row.newPath)
 
                 case .renameFolder:
-                    if fm.fileExists(atPath: row.newFolderPath),
-                       row.newFolderPath != row.oldFolderPath {
-                        throw RenameError.targetFolderExists(row.newFolderPath)
-                    }
-                    // First rename the wrapper folder, which carries every
-                    // file inside (including the video) along with it.
-                    // Then rename the video inside its new home.
+                    let oldExists = fm.fileExists(atPath: row.oldFolderPath)
+                    let newExists = fm.fileExists(atPath: row.newFolderPath)
                     if row.newFolderPath != row.oldFolderPath {
-                        try fm.moveItem(atPath: row.oldFolderPath, toPath: row.newFolderPath)
+                        if oldExists && newExists {
+                            // Genuine collision — two distinct folders
+                            // both claim the canonical path. Refuse;
+                            // user has to reconcile.
+                            throw RenameError.targetFolderExists(row.newFolderPath)
+                        }
+                        if oldExists && !newExists {
+                            try fm.moveItem(
+                                atPath: row.oldFolderPath,
+                                toPath: row.newFolderPath
+                            )
+                        }
+                        // !oldExists && newExists → already renamed by
+                        // an earlier row or a prior run. Fall through
+                        // to the file-rename step below.
                     }
                     let stagedFilePath = (row.newFolderPath as NSString)
                         .appendingPathComponent(row.currentFilename)

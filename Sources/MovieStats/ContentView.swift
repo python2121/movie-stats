@@ -243,7 +243,7 @@ struct ContentView: View {
                     searchControl
                 }
 
-                let rows = groupedRows
+                let rows = displayRows
                 if rows.isEmpty {
                     Spacer()
                     Text(searchText.isEmpty ? "No movies match the current filters." : "No matches for \"\(searchText)\".")
@@ -289,10 +289,10 @@ struct ContentView: View {
                             .help(watchedTooltip(row.representative))
                     }
                     personalStars(for: row.representative)
-                    if row.fileCount > 1 {
-                        copyCountChip(row.fileCount)
+                    if row.qualityVariantCount > 1 {
+                        copyCountChip(row.qualityVariantCount)
                     }
-                    Text(byteString(row.totalSize))
+                    Text(byteString(row.bestQualityTotalSize))
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
                     imdbRatingChip(for: row.representative)
@@ -640,114 +640,70 @@ struct ContentView: View {
         }
     }
 
-    /// The list shown in the main library view: applies the current sort
-    /// order, type filter, and search text. The row number is the position in
-    /// the currently displayed list (1, 2, 3 …), not an absolute library rank.
-    private var filteredMovies: [(rank: Int, movie: MovieFile)] {
-        let sorted: [MovieFile]
-        switch sortMode {
-        case .sizeDescending:
-            sorted = model.moviesBySize
-        case .titleAscending:
-            sorted = model.movies.sorted {
-                $0.sortTitle.localizedStandardCompare($1.sortTitle) == .orderedAscending
-            }
-        case .ratingDescending:
-            // Unrated movies sink to the bottom; size breaks rating ties.
-            sorted = model.movies.sorted {
-                ($0.imdbRating ?? -1, $0.size) > ($1.imdbRating ?? -1, $1.size)
-            }
-        case .yearDescending:
-            sorted = model.movies.sorted {
-                ($0.effectiveYear ?? 0, $0.size) > ($1.effectiveYear ?? 0, $1.size)
-            }
-        case .recentlyAdded:
-            sorted = model.movies.sorted {
-                ($0.firstSeenAt ?? .distantPast) > ($1.firstSeenAt ?? .distantPast)
-            }
-        case .recentlyWatched:
-            // Unwatched movies sink to the bottom in added order.
-            sorted = model.movies.sorted {
-                ($0.watchedAt ?? .distantPast, $0.firstSeenAt ?? .distantPast)
-                    > ($1.watchedAt ?? .distantPast, $1.firstSeenAt ?? .distantPast)
-            }
-        }
+    /// Movies that survive every active filter (type / match / watch /
+    /// genre / decade / search). No sort applied — the sorting unit
+    /// is the *grouped row*, not the file, so it runs in
+    /// `displayRows` after files have been collapsed into rows.
+    /// Surfaced for non-list consumers (e.g. `pickRandomMovie`'s
+    /// candidate pool) that just want the filtered file set.
+    private var filteredMovies: [MovieFile] {
+        var result: [MovieFile] = model.movies
 
-        let typeFiltered: [MovieFile]
-        if selectedTypes.isEmpty {
-            typeFiltered = sorted
-        } else {
-            typeFiltered = sorted.filter { movie in
+        if !selectedTypes.isEmpty {
+            result = result.filter { movie in
                 selectedTypes.contains(movie.movieType ?? "Unprobed")
             }
         }
 
-        let matchFiltered: [MovieFile]
         switch matchFilter {
-        case .all:
-            matchFiltered = typeFiltered
-        case .matched:
-            matchFiltered = typeFiltered.filter { $0.tmdbId != nil }
-        case .unmatched:
-            matchFiltered = typeFiltered.filter { $0.tmdbId == nil }
+        case .all: break
+        case .matched: result = result.filter { $0.tmdbId != nil }
+        case .unmatched: result = result.filter { $0.tmdbId == nil }
         }
 
-        let watchFiltered: [MovieFile]
         switch watchFilter {
-        case .all:
-            watchFiltered = matchFiltered
-        case .watched:
-            watchFiltered = matchFiltered.filter { $0.watchedAt != nil }
-        case .unwatched:
-            watchFiltered = matchFiltered.filter { $0.watchedAt == nil }
+        case .all: break
+        case .watched: result = result.filter { $0.watchedAt != nil }
+        case .unwatched: result = result.filter { $0.watchedAt == nil }
         }
 
-        let genreFiltered: [MovieFile]
-        if selectedGenres.isEmpty {
-            genreFiltered = watchFiltered
-        } else {
-            genreFiltered = watchFiltered.filter { movie in
+        if !selectedGenres.isEmpty {
+            result = result.filter { movie in
                 movie.genres.contains { selectedGenres.contains($0) }
             }
         }
 
-        let decadeFiltered: [MovieFile]
-        if selectedDecades.isEmpty {
-            decadeFiltered = genreFiltered
-        } else {
-            decadeFiltered = genreFiltered.filter { movie in
+        if !selectedDecades.isEmpty {
+            result = result.filter { movie in
                 guard let year = movie.effectiveYear else { return false }
                 return selectedDecades.contains((year / 10) * 10)
             }
         }
 
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let final: [MovieFile]
-        if trimmed.isEmpty {
-            final = decadeFiltered
-        } else {
+        if !trimmed.isEmpty {
             let needle = trimmed.lowercased()
-            final = decadeFiltered.filter {
+            result = result.filter {
                 $0.displayTitle.lowercased().contains(needle)
                     || $0.filename.lowercased().contains(needle)
             }
         }
 
-        return final.enumerated().map { (rank: $0.offset + 1, movie: $0.element) }
+        return result
     }
 
-    /// Groups `filteredMovies` into rows by `(tmdbId, customEdition)`
-    /// slot so multiple-quality copies of the same edition collapse
-    /// into a single library row. Each unmatched movie remains its
-    /// own row. The largest file in each group is the "representative"
-    /// — its title, path, rating, and poster drive the row, while the
-    /// chip cluster shows the union of quality attributes across every
-    /// file and the size column shows the sum.
-    private var groupedRows: [MovieRow] {
-        let movies = filteredMovies.map(\.movie)
+    /// The list shown in the main library view: filtered files
+    /// collapsed into `(tmdbId, customEdition)` slots, sorted at the
+    /// row level (size sort uses each row's best-quality total, not
+    /// any one file's size), then ranked 1…N by sorted position.
+    /// Replaces the older filter→sort→group pipeline that ranked
+    /// rows by their first-file's position in the file-level sort —
+    /// which broke for multi-part movies where the row's true size
+    /// was the sum of its parts.
+    private var displayRows: [MovieRow] {
         var groups: [String: [MovieFile]] = [:]
         var order: [String] = []
-        for movie in movies {
+        for movie in filteredMovies {
             let key: String
             if let id = movie.tmdbId {
                 let edition = (movie.customEdition ?? "")
@@ -766,13 +722,14 @@ struct ContentView: View {
             }
             groups[key]!.append(movie)
         }
-        return order.enumerated().map { idx, key in
+
+        // Build unranked rows; intra-row file order is parts
+        // ascending then qualities largest-first so the Play menu
+        // reads Part 1 → Part 2 → … with each part's best quality on
+        // top. Solo files fall through to size sort.
+        let unranked: [MovieRow] = order.map { key in
             let files = groups[key]!
             let rep = files.max(by: { $0.size < $1.size }) ?? files[0]
-            // Order parts ascending, then qualities largest-first, so
-            // the Play menu reads Part 1 → Part 2 → … with each
-            // part's best quality at the top. Solo files have no part
-            // number and fall through to size sort.
             let sorted = files.sorted { a, b in
                 switch (a.partNumber, b.partNumber) {
                 case let (lhs?, rhs?) where lhs != rhs: return lhs < rhs
@@ -781,7 +738,58 @@ struct ContentView: View {
                 default: return a.size > b.size
                 }
             }
-            return MovieRow(rank: idx + 1, representative: rep, allFiles: sorted)
+            return MovieRow(rank: 0, representative: rep, allFiles: sorted)
+        }
+
+        // Sort the rows. Non-size sorts use the representative file's
+        // attribute — for a (tmdbId, edition) group those are the
+        // same across every file. Size sort uses the row's
+        // best-quality total so multi-part movies sit at the rank
+        // their on-disk size actually warrants.
+        let sorted: [MovieRow]
+        switch sortMode {
+        case .sizeDescending:
+            sorted = unranked.sorted { $0.bestQualityTotalSize > $1.bestQualityTotalSize }
+        case .titleAscending:
+            sorted = unranked.sorted {
+                $0.representative.sortTitle
+                    .localizedStandardCompare($1.representative.sortTitle) == .orderedAscending
+            }
+        case .ratingDescending:
+            sorted = unranked.sorted { a, b in
+                let ar = a.representative.imdbRating ?? -1
+                let br = b.representative.imdbRating ?? -1
+                if ar != br { return ar > br }
+                return a.bestQualityTotalSize > b.bestQualityTotalSize
+            }
+        case .yearDescending:
+            sorted = unranked.sorted { a, b in
+                let ay = a.representative.effectiveYear ?? 0
+                let by = b.representative.effectiveYear ?? 0
+                if ay != by { return ay > by }
+                return a.bestQualityTotalSize > b.bestQualityTotalSize
+            }
+        case .recentlyAdded:
+            sorted = unranked.sorted {
+                ($0.representative.firstSeenAt ?? .distantPast)
+                    > ($1.representative.firstSeenAt ?? .distantPast)
+            }
+        case .recentlyWatched:
+            sorted = unranked.sorted { a, b in
+                let aw = a.representative.watchedAt ?? .distantPast
+                let bw = b.representative.watchedAt ?? .distantPast
+                if aw != bw { return aw > bw }
+                return (a.representative.firstSeenAt ?? .distantPast)
+                    > (b.representative.firstSeenAt ?? .distantPast)
+            }
+        }
+
+        return sorted.enumerated().map { idx, row in
+            MovieRow(
+                rank: idx + 1,
+                representative: row.representative,
+                allFiles: row.allFiles
+            )
         }
     }
 
@@ -1083,7 +1091,7 @@ struct ContentView: View {
     /// currently-filtered movies, preferring unwatched titles and skewing
     /// toward higher IMDb ratings. Opens the pick's detail sheet.
     private func pickRandomMovie() {
-        let pool = filteredMovies.map(\.movie)
+        let pool = filteredMovies
         guard !pool.isEmpty else { return }
         let unwatched = pool.filter { $0.watchedAt == nil }
         let candidates = unwatched.isEmpty ? pool : unwatched
@@ -1302,10 +1310,23 @@ private struct MovieDetailSheet: View {
             Divider()
 
             HStack(spacing: 14) {
-                Button {
-                    ExternalPlayer.play(path: movie.path)
-                } label: {
-                    Label("Play in \(ExternalPlayer.playerName)", systemImage: "play.fill")
+                if groupFiles.count > 1 {
+                    Menu {
+                        ForEach(groupFiles) { file in
+                            Button(detailPlayMenuLabel(for: file)) {
+                                ExternalPlayer.play(path: file.path)
+                            }
+                        }
+                    } label: {
+                        Label("Play in \(ExternalPlayer.playerName)", systemImage: "play.fill")
+                    }
+                    .help("Pick a part / quality to launch in \(ExternalPlayer.playerName).")
+                } else {
+                    Button {
+                        ExternalPlayer.play(path: movie.path)
+                    } label: {
+                        Label("Play in \(ExternalPlayer.playerName)", systemImage: "play.fill")
+                    }
                 }
                 if movie.tmdbId != nil {
                     Button {
@@ -1692,6 +1713,25 @@ private struct MovieDetailSheet: View {
                 }
             }
         }
+    }
+
+    /// Per-file label for the detail-sheet Play menu — mirrors the
+    /// library-list `playMenuLabel` so the user sees the same
+    /// `[Part N · ][quality · ]<size>` composition in both places.
+    /// Falls back to the filename for unprobed solo files so the
+    /// menu item isn't just a bare size.
+    private func detailPlayMenuLabel(for file: MovieFile) -> String {
+        var pieces: [String] = []
+        if let part = file.partNumber {
+            pieces.append("Part \(part)")
+        }
+        if let type = file.movieType, type != MovieType.unknown.rawValue {
+            pieces.append(type)
+        } else if file.partNumber == nil {
+            pieces.append(file.filename)
+        }
+        pieces.append(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
+        return pieces.joined(separator: " · ")
     }
 
     private func subtitleFlags(_ sub: SubtitleFile) -> String {
@@ -2266,6 +2306,49 @@ struct MovieRow: Identifiable {
     /// movie. Mixed groups (some files with parts, some without) also
     /// count — they're still a multi-part presentation.
     var isMultiPart: Bool { partNumbers.count >= 2 }
+
+    /// Number of distinct quality buckets present in the group (4K
+    /// UHD Remux, 1080p Encode, …). Unprobed rows contribute
+    /// nothing to the count. Drives the right-hand count chip — that
+    /// chip is reserved for multi-quality rows; multi-part-only rows
+    /// already carry the left-hand "N parts" chip and shouldn't get
+    /// counted on the right too.
+    var qualityVariantCount: Int {
+        Set(allFiles.compactMap(\.movieType))
+            .filter { $0 != MovieType.unknown.rawValue }
+            .count
+    }
+
+    /// Best quality bucket present in the group, chosen by
+    /// `MovieType.allCases` order (4K UHD Remux > 1080p Blu-ray Remux
+    /// > 4K Encode > 1080p Encode > 720p Encode > SD). nil when
+    /// nothing in the group has been probed yet.
+    var bestMovieType: String? {
+        let present = Set(allFiles.compactMap(\.movieType))
+            .filter { $0 != MovieType.unknown.rawValue }
+        return MovieType.allCases
+            .map(\.rawValue)
+            .first(where: { present.contains($0) })
+    }
+
+    /// Files at the row's best quality bucket. The "redundant
+    /// lower-quality copies" answer to the question "how big is this
+    /// movie on disk?" — those are sibling versions, not part of the
+    /// canonical answer. Falls back to every file when no probe data
+    /// is available yet, so partial states still show a meaningful
+    /// size.
+    var bestQualityFiles: [MovieFile] {
+        guard let best = bestMovieType else { return allFiles }
+        return allFiles.filter { $0.movieType == best }
+    }
+
+    /// Size shown in the library table + used by the size-descending
+    /// sort. Sum of every part of the row's best quality variant —
+    /// excludes lower-quality redundant copies (and, separately,
+    /// extras, which aren't in `allFiles` to begin with).
+    var bestQualityTotalSize: Int64 {
+        bestQualityFiles.reduce(Int64(0)) { $0 + $1.size }
+    }
 }
 
 /// Compact stat tile used in the narrow left column. Icon + small caption +
