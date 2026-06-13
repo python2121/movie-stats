@@ -153,9 +153,53 @@ final class MatcherModel {
 
     private let scope: any MovieScope
     private var scanTask: Task<Void, Never>?
+    /// When true, every candidate change writes the basic `(tmdbId,
+    /// confirmedYear, customEdition)` through to `scope` immediately
+    /// — no batched-Confirm checkpoint. The import wizard turns this
+    /// on so a user who picks a candidate then clicks Next (without
+    /// matcher-Confirm) doesn't drop the match. Standalone library
+    /// matcher leaves it off — Confirm is the user's atomic
+    /// checkpoint there. `confirm()` still runs in either mode and
+    /// upgrades the row with the cached TMDB detail's authoritative
+    /// year + caches the poster.
+    private let autoCommitOnPick: Bool
 
-    init(scope: any MovieScope) {
+    init(scope: any MovieScope, autoCommitOnPick: Bool = false) {
         self.scope = scope
+        self.autoCommitOnPick = autoCommitOnPick
+    }
+
+    /// Writes the row's current candidate/edition through to the
+    /// scope when auto-commit is on. Bridges the gap between a
+    /// pending pick and the explicit-Confirm commit so downstream
+    /// surfaces (import wizard's Replace + Extra eligibility) see
+    /// the match without an intermediate user action.
+    private func commitToScopeIfAutoMode(rowID: Row.ID) {
+        guard autoCommitOnPick,
+              let idx = rows.firstIndex(where: { $0.id == rowID })
+        else { return }
+        let row = rows[idx]
+        if let candidate = row.candidate {
+            // Year sourced from the candidate's search-endpoint year;
+            // `confirm()` later refines this with the
+            // release_dates-derived preferredReleaseDate.
+            let year = candidate.year.flatMap(Int.init)
+            try? scope.setTMDBMatch(
+                forPath: row.path,
+                tmdbID: candidate.id,
+                confirmedYear: year,
+                customEdition: row.customEdition
+            )
+        } else {
+            // Cleared candidate — remove the match from the scope so
+            // a stale tmdbId can't survive on session.movies.
+            try? scope.setTMDBMatch(
+                forPath: row.path,
+                tmdbID: nil,
+                confirmedYear: nil,
+                customEdition: nil
+            )
+        }
     }
 
     /// Rebuilds `rows` from the scope's current unmatched movies. Call
@@ -231,6 +275,7 @@ final class MatcherModel {
                 // An embedded TMDB id is an explicit user (or tool)
                 // signal — treat as auto-include, no review needed.
                 rows[index].included = true
+                commitToScopeIfAutoMode(rowID: rows[index].id)
                 continue
             }
 
@@ -264,6 +309,13 @@ final class MatcherModel {
                     // Only auto-include exact matches; everything else
                     // waits for explicit user review.
                     rows[index].included = rows[index].isExactMatch
+                    // Auto-commit fires only when the row was
+                    // auto-included (exact match) — fuzzy matches
+                    // shouldn't slip a Match through without the
+                    // user's eye on them.
+                    if rows[index].included {
+                        commitToScopeIfAutoMode(rowID: rows[index].id)
+                    }
                 } else {
                     rows[index].candidate = nil
                     rows[index].preferredYear = nil
@@ -299,6 +351,7 @@ final class MatcherModel {
         rows[idx].included = true
         let trimmed = customEdition?.trimmingCharacters(in: .whitespacesAndNewlines)
         rows[idx].customEdition = (trimmed?.isEmpty == false) ? trimmed : nil
+        commitToScopeIfAutoMode(rowID: rowID)
     }
 
     /// Removes the candidate from a row (e.g. user clears it before
@@ -310,6 +363,7 @@ final class MatcherModel {
         rows[idx].status = .pending
         rows[idx].failureReason = nil
         rows[idx].included = false
+        commitToScopeIfAutoMode(rowID: rowID)
     }
 
     /// Sets the include flag for one row from the checkbox column.

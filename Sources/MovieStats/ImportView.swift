@@ -43,12 +43,17 @@ struct ImportView: View {
         .onAppear {
             if session == nil { session = ImportSession(appModel: appModel) }
         }
-        .onExitCommand {
-            // Esc inside the wizard rewinds to step 1 rather than
-            // closing the window — keeps the user in the import
-            // surface so they can start a fresh import without
-            // reopening it. Title-bar close still dismisses.
-            session?.resetToStart()
+        .onExitCommand { dismiss() }
+        .background {
+            // SwiftUI's Table inside the matcher / rename panels
+            // grabs first-responder focus and swallows Escape before
+            // `.onExitCommand` can fire (same workaround used by
+            // RenameView — CLAUDE.md §6.9). The hidden cancel-action
+            // button registers a window-wide shortcut the Table
+            // can't intercept.
+            Button("Close") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+                .hidden()
         }
         .confirmationDialog(
             matchReplaceDialogTitle(),
@@ -578,9 +583,8 @@ struct ImportView: View {
     private func footer(session: ImportSession) -> some View {
         HStack(spacing: 12) {
             Button("Cancel Import") { session.resetToStart() }
-                .keyboardShortcut(.cancelAction)
                 .disabled(session.isBusy)
-                .help("Discard everything you've done so far and return to Step 1 (Pick Source). Close the window from the title bar to exit the wizard entirely.")
+                .help("Discard everything you've done so far and return to Step 1 (Pick Source). Press Escape (or click the close button on the title bar) to exit the wizard entirely.")
             Spacer()
             if session.currentStep != .pickDirectory, session.currentStep != .done {
                 Button {

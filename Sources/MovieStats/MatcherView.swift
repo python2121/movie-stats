@@ -132,7 +132,15 @@ struct MatcherView: View {
         .frame(minWidth: embedded ? nil : 760, minHeight: embedded ? nil : 480)
         .onAppear {
             if matcher == nil {
-                matcher = MatcherModel(scope: scopedScope ?? appModel)
+                // Embedded mode (import wizard) auto-commits each
+                // pick so downstream wizard steps see the tmdbId
+                // without needing an explicit matcher-Confirm click.
+                // Standalone library matcher leaves it off — Confirm
+                // is the user's atomic checkpoint there.
+                matcher = MatcherModel(
+                    scope: scopedScope ?? appModel,
+                    autoCommitOnPick: scopedScope != nil
+                )
             }
             // Re-parse the file-title list from the AppModel every time the
             // window appears so a fresh rescan picks up renames / new files
