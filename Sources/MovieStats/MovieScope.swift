@@ -31,7 +31,11 @@ protocol MovieScope: AnyObject {
     func reloadFromStore()
     /// Record a TMDB match for the file at `path`. Live scope writes
     /// it through to the DB; import scope updates the in-memory entry.
-    func setTMDBMatch(forPath path: String, tmdbID: Int?, confirmedYear: Int?) throws
+    /// `customEdition` is an optional user-typed label like
+    /// `"4K77 v1.4"` or `"Director's Cut"` that gets emitted by the
+    /// renamer as `{edition-<value>}` in the canonical filename. nil /
+    /// empty means no edition tag.
+    func setTMDBMatch(forPath path: String, tmdbID: Int?, confirmedYear: Int?, customEdition: String?) throws
     /// Record that the file at `oldPath` has been renamed to `newPath`
     /// on disk. Live scope writes it through to the DB; import scope
     /// updates the in-memory entry so subsequent steps see the new path.
@@ -39,8 +43,18 @@ protocol MovieScope: AnyObject {
 }
 
 extension AppModel: MovieScope {
-    func setTMDBMatch(forPath path: String, tmdbID: Int?, confirmedYear: Int?) throws {
-        try store?.setTMDBMatch(forPath: path, tmdbID: tmdbID, confirmedYear: confirmedYear)
+    func setTMDBMatch(
+        forPath path: String,
+        tmdbID: Int?,
+        confirmedYear: Int?,
+        customEdition: String?
+    ) throws {
+        try store?.setTMDBMatch(
+            forPath: path,
+            tmdbID: tmdbID,
+            confirmedYear: confirmedYear,
+            customEdition: customEdition
+        )
     }
 
     func updatePath(oldPath: String, newPath: String, newFilename: String) throws {

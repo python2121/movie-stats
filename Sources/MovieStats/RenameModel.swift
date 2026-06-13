@@ -15,18 +15,33 @@ final class RenameModel {
         /// Path relative to the scan root for display (full path if the
         /// movie sits outside the root for any reason).
         let currentDisplay: String
-        /// Display version of the post-rename path.
-        let proposedDisplay: String
+        /// Display version of the post-rename path. Recomputed when the
+        /// multi-quality post-pass swaps in a `[qualityTag]` suffix.
+        var proposedDisplay: String
         /// Absolute target path for the movie file after the rename.
-        let newPath: String
+        /// Recomputed alongside `newFilename` during the multi-quality
+        /// post-pass.
+        var newPath: String
         /// Absolute target path for the wrapping folder.
         let newFolderPath: String
         /// Absolute path of the movie's current immediate parent.
         let oldFolderPath: String
-        /// Filename portion of `newPath`.
-        let newFilename: String
+        /// Filename portion of `newPath`. Recomputed during the multi-
+        /// quality post-pass when this row's tmdb + edition slot has
+        /// siblings (a `[4K Remux]` / `[1080p]` suffix gets injected to
+        /// distinguish them).
+        var newFilename: String
         /// What kind of disk operation this row needs.
         let plan: Plan
+        /// TMDB id this row is anchored to — used to bucket rows into
+        /// "what Plex considers one library entry" groups during the
+        /// multi-quality post-pass.
+        let tmdbId: Int
+        /// User-typed edition label, when set. Pairs with `tmdbId` to
+        /// form the grouping key for multi-quality detection — same
+        /// tmdb but a different edition is *not* a collision, it's two
+        /// alternate versions Plex surfaces independently.
+        let customEdition: String?
         /// Did the source filename / path indicate a Remux source? Drives
         /// the `[Remux]` tag preservation on the new filename.
         let isRemux: Bool
@@ -34,6 +49,12 @@ final class RenameModel {
         /// trouble chars the sanitizer rewrites — used to sort these rows
         /// to the top.
         let hasSpecialCharacters: Bool
+        /// True when the multi-quality post-pass rewrote this row's
+        /// filename to include a `[qualityTag]` because it shares a
+        /// tmdb + edition group with at least one other row. Drives a
+        /// soft chip in the UI so the user knows the suffix is
+        /// collision-driven, not a free choice.
+        var hasQualitySuffix: Bool = false
         /// True when this row competes with one or more other rows for the
         /// exact same destination path (i.e. two different source files
         /// matched to the same TMDB ID). Surfaced in the UI as a red
@@ -71,8 +92,10 @@ final class RenameModel {
     struct SubtitleAsset: Identifiable, Equatable {
         /// Absolute path captured at plan-build time.
         let path: String
-        /// Absolute target path after Apply runs.
-        let newPath: String
+        /// Absolute target path after Apply runs. Mutable because the
+        /// multi-quality post-pass restems subtitle targets when its
+        /// owning video gets a `[qualityTag]` suffix appended.
+        var newPath: String
         /// Name of the original Subs-style container, if the file lived in
         /// one. nil for siblings directly next to the video. Used at apply
         /// time to canonicalize the folder to `Subs/` before renaming the
@@ -244,8 +267,20 @@ final class RenameModel {
             let folderName = FilenameSanitizer.folderName(
                 title: detail.title, year: year, tmdbID: tmdbID
             )
+            // Initial composition treats every row as solo: just the
+            // `Remux` suffix when applicable. If the multi-quality
+            // post-pass later finds another row in this row's tmdb +
+            // edition slot, both get recomposed with a full
+            // `[qualityTag]` suffix that subsumes Remux. Solo rows are
+            // untouched so existing solo-file naming stays stable
+            // across reloads.
+            let soloQualityTag: String? = isRemux ? "Remux" : nil
             let fileBase = FilenameSanitizer.fileBasename(
-                title: detail.title, year: year, tmdbID: tmdbID, isRemux: isRemux
+                title: detail.title,
+                year: year,
+                tmdbID: tmdbID,
+                customEdition: movie.customEdition,
+                qualityTag: soloQualityTag
             )
             let newFilename = ext.isEmpty ? fileBase : "\(fileBase).\(ext)"
             let newFolderPath = (containerDir as NSString).appendingPathComponent(folderName)
@@ -301,10 +336,79 @@ final class RenameModel {
                 oldFolderPath: parent,
                 newFilename: newFilename,
                 plan: plan,
+                tmdbId: tmdbID,
+                customEdition: movie.customEdition,
                 isRemux: isRemux,
                 hasSpecialCharacters: hasSpecial,
                 subtitles: subtitles
             ))
+        }
+
+        // Multi-quality post-pass: when two or more rows share a
+        // (tmdb, customEdition) slot they're alternate-quality copies
+        // of the same movie+edition (e.g. a 4K Remux next to a 1080p
+        // transcode). The solo-style name is identical for both, which
+        // would trip the duplicate-target detector below. Inject a
+        // `[<qualityTag>]` suffix into each colliding row's filename
+        // — derived from ffprobe data — so the rows end up at distinct
+        // canonical paths and Plex/Jellyfin see them as alternate
+        // versions of one library entry. Solo rows (groups of 1) are
+        // untouched, preserving the existing single-version naming.
+        var slotIndices: [String: [Int]] = [:]
+        for (i, row) in newRows.enumerated() {
+            let editionKey = row.customEdition ?? ""
+            let key = "\(row.tmdbId)|\(editionKey)"
+            slotIndices[key, default: []].append(i)
+        }
+        let moviesByPath: [String: MovieFile] = Dictionary(
+            uniqueKeysWithValues: scope.movies.map { ($0.path, $0) }
+        )
+        for (_, indices) in slotIndices where indices.count > 1 {
+            for idx in indices {
+                let row = newRows[idx]
+                guard let movie = moviesByPath[row.path],
+                      let detail = detailCache[row.tmdbId] else { continue }
+                let qualityTag = FilenameSanitizer.qualityTag(
+                    width: movie.width,
+                    height: movie.height,
+                    isRemux: row.isRemux,
+                    hdrFormat: movie.hdrFormat,
+                    hasDolbyVision: movie.hasDolbyVision
+                )
+                let year: Int? = movie.confirmedYear ?? detail.year.flatMap(Int.init)
+                let newBase = FilenameSanitizer.fileBasename(
+                    title: detail.title,
+                    year: year,
+                    tmdbID: row.tmdbId,
+                    customEdition: row.customEdition,
+                    qualityTag: qualityTag
+                )
+                let ext = (row.currentFilename as NSString).pathExtension
+                let newFilename = ext.isEmpty ? newBase : "\(newBase).\(ext)"
+                let newPath = (row.newFolderPath as NSString).appendingPathComponent(newFilename)
+                let newStem = newBase
+                let oldStem = (row.newFilename as NSString).deletingPathExtension
+                newRows[idx].newFilename = newFilename
+                newRows[idx].newPath = newPath
+                newRows[idx].proposedDisplay = Self.displayPath(newPath, rootStd: rootStd)
+                newRows[idx].hasQualitySuffix = true
+                // Re-stem each subtitle target so sidecars stay matched
+                // to the video filename (Plex / Jellyfin pair by stem).
+                // Only the leading stem part of the subtitle filename
+                // changes; the language / descriptor / extension trail
+                // is preserved verbatim.
+                guard oldStem != newStem else { continue }
+                for subIdx in newRows[idx].subtitles.indices {
+                    let oldSubPath = newRows[idx].subtitles[subIdx].newPath
+                    let dir = (oldSubPath as NSString).deletingLastPathComponent
+                    let subFilename = (oldSubPath as NSString).lastPathComponent
+                    guard subFilename.hasPrefix(oldStem) else { continue }
+                    let trailing = subFilename.dropFirst(oldStem.count)
+                    let newSubFilename = newStem + trailing
+                    let newSubPath = (dir as NSString).appendingPathComponent(newSubFilename)
+                    newRows[idx].subtitles[subIdx].newPath = newSubPath
+                }
+            }
         }
 
         // Duplicate-target detection: when two source files matched to

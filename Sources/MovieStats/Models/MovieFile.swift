@@ -70,6 +70,15 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// (the Perfect Blue / Miracle Mile festival-year case).
     var confirmedYear: Int?
 
+    /// Optional user-typed edition label (e.g. "4K77 v1.4",
+    /// "Director's Cut", "Despecialized v2.7") captured by the matcher
+    /// when picking a TMDB candidate. The renamer emits this as
+    /// `{edition-<value>}` in the canonical filename so Plex / Jellyfin
+    /// can surface multiple cuts of the same TMDB id as alternate
+    /// versions under one library entry. Stored in
+    /// `movies.custom_edition`.
+    var customEdition: String?
+
     /// Year to use when rendering this movie everywhere outside of the
     /// matcher itself. Precedence: matcher's locked-in confirmation →
     /// TMDB's preferred-release year → filename-parsed year.

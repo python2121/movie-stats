@@ -62,13 +62,88 @@ enum FilenameSanitizer {
         return base
     }
 
-    /// Canonical file basename (no extension). Appends ` [Remux]` when the
-    /// source file's path indicated a Remux — scanner-ignored, helpful for
-    /// human eyes.
-    static func fileBasename(title: String, year: Int?, tmdbID: Int, isRemux: Bool) -> String {
+    /// Canonical file basename (no extension). Composes:
+    ///
+    ///   `Title (Year) {tmdb-N}[ {edition-X}][ [qualityTag]]`
+    ///
+    /// - `{edition-X}` — user-typed label captured at matcher-confirm
+    ///   time (e.g. "4K77 v1.4", "Director's Cut"). Both Plex and
+    ///   Jellyfin parse it as an edition qualifier so multiple cuts of
+    ///   the same TMDB id can coexist as alternate versions under one
+    ///   wrapper folder.
+    /// - `[qualityTag]` — single bracket slot for source-type / quality
+    ///   metadata. For solo files this is just `"Remux"` (when the
+    ///   source path indicated a Remux) or nil (otherwise). For
+    ///   multi-quality cases — two files with the same tmdb + edition
+    ///   that differ in resolution / HDR / source — the caller passes
+    ///   a fuller tag like `"4K Remux"`, `"1080p HDR"`, etc. The slot
+    ///   subsumes Remux into the fuller tag so we never emit double-
+    ///   brackets like `[4K Remux] [Remux]`.
+    static func fileBasename(
+        title: String,
+        year: Int?,
+        tmdbID: Int,
+        customEdition: String? = nil,
+        qualityTag: String? = nil
+    ) -> String {
         var base = folderName(title: title, year: year, tmdbID: tmdbID)
-        if isRemux { base += " [Remux]" }
+        // Edition is sanitized through the same path-safety pass as the
+        // title; empty / whitespace-only editions emit nothing rather
+        // than a literal `{edition-}` block.
+        if let edition = customEdition {
+            let sanitized = sanitize(edition)
+            if !sanitized.isEmpty {
+                base += " {edition-\(sanitized)}"
+            }
+        }
+        if let qualityTag {
+            let sanitized = sanitize(qualityTag)
+            if !sanitized.isEmpty {
+                base += " [\(sanitized)]"
+            }
+        }
         return base
+    }
+
+    /// Composes a quality-tag string from a movie's probed metadata.
+    /// Combines resolution bucket + HDR/DV modifier + Remux flag into
+    /// the order most familiar from scene release naming:
+    ///
+    ///   `"4K HDR Remux"`, `"4K DV"`, `"1080p Remux"`, `"720p"`, …
+    ///
+    /// Used by the renamer when multiple files share the same tmdb +
+    /// edition slot and need a `[qualityTag]` suffix to distinguish
+    /// them. Returns `"Unknown"` when the file hasn't been probed —
+    /// such rows still get a non-empty tag so the duplicate-conflict
+    /// detector flags them properly instead of silently colliding.
+    static func qualityTag(
+        width: Int?,
+        height: Int?,
+        isRemux: Bool,
+        hdrFormat: String?,
+        hasDolbyVision: Bool
+    ) -> String {
+        let resolution: String
+        if let width {
+            if width >= 3840 { resolution = "4K" }
+            else if width >= 1920 { resolution = "1080p" }
+            else if width >= 1280 { resolution = "720p" }
+            else { resolution = "SD" }
+        } else {
+            resolution = "Unknown"
+        }
+        var parts: [String] = [resolution]
+        // DV and HDR can coexist on the same file, but `[4K DV HDR]`
+        // reads ugly and isn't standard scene shape — prefer DV when
+        // both are present (DV file = HDR-capable, the HDR base layer
+        // is implied).
+        if hasDolbyVision {
+            parts.append("DV")
+        } else if hdrFormat != nil {
+            parts.append("HDR")
+        }
+        if isRemux { parts.append("Remux") }
+        return parts.joined(separator: " ")
     }
 
     /// True if `raw` contains any character or pattern the sanitizer would

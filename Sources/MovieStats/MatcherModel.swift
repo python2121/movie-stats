@@ -86,6 +86,12 @@ final class MatcherModel {
         /// shown for foreign films whose origin-country premiere predates
         /// their US wide release.
         var preferredYear: String?
+        /// Optional user-typed edition label (e.g. "4K77 v1.4",
+        /// "Director's Cut") captured from the manual-pick sheet.
+        /// Flows into the canonical filename as `{edition-<value>}` at
+        /// rename time, so multiple cuts of the same TMDB id can
+        /// coexist under one wrapper folder. nil for the typical row.
+        var customEdition: String?
 
         var id: String { path }
 
@@ -281,14 +287,18 @@ final class MatcherModel {
     /// Replaces the candidate for one row with a manually-picked TMDB result.
     /// Manual picks count as explicit endorsement, so they're auto-included.
     /// The preferred-year override is dropped — it belonged to the previous
-    /// candidate.
-    func setCandidate(_ candidate: TMDBMovie, for rowID: Row.ID) {
+    /// candidate. `customEdition` is the optional edition label the user
+    /// typed alongside the search; nil means "no edition tag, treat as
+    /// the canonical version."
+    func setCandidate(_ candidate: TMDBMovie, customEdition: String?, for rowID: Row.ID) {
         guard let idx = rows.firstIndex(where: { $0.id == rowID }) else { return }
         rows[idx].candidate = candidate
         rows[idx].preferredYear = nil
         rows[idx].status = .matched
         rows[idx].failureReason = nil
         rows[idx].included = true
+        let trimmed = customEdition?.trimmingCharacters(in: .whitespacesAndNewlines)
+        rows[idx].customEdition = (trimmed?.isEmpty == false) ? trimmed : nil
     }
 
     /// Removes the candidate from a row (e.g. user clears it before
@@ -390,7 +400,8 @@ final class MatcherModel {
                 try scope.setTMDBMatch(
                     forPath: entry.path,
                     tmdbID: tmdbID,
-                    confirmedYear: confirmedYear
+                    confirmedYear: confirmedYear,
+                    customEdition: row?.customEdition
                 )
                 confirmedPaths.insert(entry.path)
             } catch {

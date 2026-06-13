@@ -268,6 +268,10 @@ struct RenameView: View {
                     StatusChip(text: "duplicate", color: .red)
                         .help("Another row targets the same canonical path (likely two source files matched to the same TMDB id). Unchecked by default — reconcile before Apply: delete the redundant copy or re-match one to a different movie.")
                 }
+                if row.hasQualitySuffix {
+                    StatusChip(text: "multi-quality", color: .teal)
+                        .help("Another row shares this row's TMDB id and edition slot, so a [<quality>] suffix has been appended to the filename (derived from ffprobe data) to keep the two on disk as distinct alternate-version files. Plex / Jellyfin group them under one library entry with a version picker.")
+                }
                 if row.hasSpecialCharacters {
                     StatusChip(text: "special chars", color: .orange)
                 }
@@ -517,6 +521,7 @@ struct RenameView: View {
 
             var flags: [String] = []
             if row.duplicateConflict { flags.append("DUPLICATE — same target as another row") }
+            if row.hasQualitySuffix { flags.append("multi-quality — [qualityTag] appended") }
             if row.hasSpecialCharacters { flags.append("special chars") }
             if row.isRemux { flags.append("Remux") }
             if row.plan == .createFolderAndMove { flags.append("loose top-level (creates wrapper)") }

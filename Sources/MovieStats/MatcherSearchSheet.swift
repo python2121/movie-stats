@@ -5,10 +5,17 @@ import SwiftUI
 /// user edit and re-search, then calls back with the chosen result.
 struct MatcherSearchSheet: View {
     let row: MatcherModel.Row
-    let onPick: (TMDBMovie) -> Void
+    /// Callback fired when the user clicks a result. The second argument
+    /// is the optional edition label they typed (nil / empty when they
+    /// left the field blank — the typical case). Edition flows into the
+    /// canonical filename as `{edition-<value>}` so multiple cuts of
+    /// the same TMDB id coexist as alternate versions under one
+    /// Plex/Jellyfin wrapper.
+    let onPick: (TMDBMovie, String?) -> Void
     let onCancel: () -> Void
 
     @State private var query: String = ""
+    @State private var customEdition: String = ""
     @State private var results: [TMDBMovie] = []
     @State private var isSearching = false
     @State private var lastError: String?
@@ -19,14 +26,16 @@ struct MatcherSearchSheet: View {
             header
             Divider()
             searchBar
+            editionInput
             Divider()
             content
             Divider()
             footer
         }
-        .frame(width: 620, height: 540)
+        .frame(width: 620, height: 580)
         .onAppear {
             query = row.parsedTitle.isEmpty ? row.displayTitle : row.parsedTitle
+            customEdition = row.customEdition ?? ""
             searchFocused = true
             Task { await runSearch() }
         }
@@ -68,6 +77,29 @@ struct MatcherSearchSheet: View {
         .padding(.vertical, 8)
     }
 
+    /// Optional edition label. Anything typed here is sent to the
+    /// matcher with the picked candidate; the renamer then emits it as
+    /// `{edition-<value>}` in the canonical filename. Use for fan
+    /// edits, alternate cuts, or restoration projects (e.g. "4K77 v1.4",
+    /// "Director's Cut", "Despecialized v2.7"). Leave blank for the
+    /// vast majority of rows.
+    private var editionInput: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tag")
+                .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 2) {
+                TextField("Custom edition (optional) — e.g. 4K77 v1.4 or Director's Cut",
+                          text: $customEdition)
+                    .textFieldStyle(.plain)
+                Text("Written into the canonical filename as {edition-<value>}. Leave blank for the standard release.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
     @ViewBuilder
     private var content: some View {
         if isSearching {
@@ -103,7 +135,8 @@ struct MatcherSearchSheet: View {
 
     private func resultRow(_ result: TMDBMovie) -> some View {
         Button {
-            onPick(result)
+            let trimmed = customEdition.trimmingCharacters(in: .whitespacesAndNewlines)
+            onPick(result, trimmed.isEmpty ? nil : trimmed)
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {

@@ -3,6 +3,22 @@ import SwiftUI
 /// "Match Library to TMDB" window. Lists every unmatched movie on the left,
 /// TMDB auto-match result on the right (clickable to override), Scan +
 /// Confirm at the bottom.
+/// Wires the import wizard's "Replace existing copy" behavior into
+/// `MatcherView` without making the standalone library matcher know
+/// about import sessions. Set by `ImportView` only; nil for the
+/// standalone window.
+struct MatcherReplaceConfig {
+    /// True iff this row's currently-selected candidate matches a
+    /// movie already in the live library (same TMDB id AND same
+    /// custom edition slot). Drives whether the Replace cell renders
+    /// a checkbox or stays blank.
+    var isReplaceable: (MatcherModel.Row) -> Bool
+    /// Whether the user has currently checked Replace for this row.
+    var isMarked: (MatcherModel.Row) -> Bool
+    /// Toggle the user's Replace choice for one row.
+    var setMarked: (MatcherModel.Row, Bool) -> Void
+}
+
 struct MatcherView: View {
     /// Optional scope override. When set, the matcher is constructed
     /// against this scope (e.g. an `ImportSession`) instead of the
@@ -11,6 +27,12 @@ struct MatcherView: View {
     /// Drops window-style chrome (dismiss hook, fixed min-size) when
     /// true — for embedding inside another container.
     let embedded: Bool
+    /// Optional Replace-column plumbing. nil in the standalone library
+    /// matcher; non-nil when embedded in the import wizard's Match
+    /// step. When set, the table grows a "Replace" column at the end
+    /// that fires per-row checkboxes for the import's duplicate
+    /// conflicts.
+    let replaceConfig: MatcherReplaceConfig?
 
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
@@ -18,14 +40,22 @@ struct MatcherView: View {
     @State private var matcher: MatcherModel?
     @State private var editingRow: MatcherModel.Row?
 
-    init(scopedScope: (any MovieScope)? = nil, embedded: Bool = false) {
+    init(
+        scopedScope: (any MovieScope)? = nil,
+        embedded: Bool = false,
+        replaceConfig: MatcherReplaceConfig? = nil
+    ) {
         self.scopedScope = scopedScope
         self.embedded = embedded
+        self.replaceConfig = replaceConfig
     }
 
     /// Width of the right-hand include checkbox column. Same value used by
     /// both the header cell and each row's checkbox so they stay aligned.
     private static let includeColumnWidth: CGFloat = 80
+    /// Width of the Replace column when present. Slightly wider than
+    /// the Include column because the header text reads longer.
+    private static let replaceColumnWidth: CGFloat = 90
 
     var body: some View {
         Group {
@@ -53,8 +83,8 @@ struct MatcherView: View {
         .sheet(item: $editingRow) { row in
             MatcherSearchSheet(
                 row: row,
-                onPick: { pick in
-                    matcher?.setCandidate(pick, for: row.id)
+                onPick: { pick, edition in
+                    matcher?.setCandidate(pick, customEdition: edition, for: row.id)
                     editingRow = nil
                 },
                 onCancel: { editingRow = nil }
@@ -167,6 +197,15 @@ struct MatcherView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: Self.includeColumnWidth, alignment: .center)
                         .padding(.vertical, 6)
+                    if replaceConfig != nil {
+                        Divider()
+                        Text("Replace")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: Self.replaceColumnWidth, alignment: .center)
+                            .padding(.vertical, 6)
+                            .help("Check to mark the matching library copy for permanent deletion when this import is moved to the library. Only available for rows whose selected TMDB candidate (and custom edition) already exists in the library.")
+                    }
                 }
                 .background(.quaternary.opacity(0.3))
                 Divider()
@@ -221,8 +260,41 @@ struct MatcherView: View {
             .help(row.candidate == nil
                   ? "Pick a TMDB match first to include this row"
                   : "Include this row when you click Confirm")
+
+            if let replaceConfig {
+                Divider()
+                replaceCell(for: row, config: replaceConfig)
+            }
         }
         .background(isCurrent ? Color.accentColor.opacity(0.12) : .clear)
+    }
+
+    /// Renders the Replace column cell. Shows a checkbox bound to the
+    /// import session's per-row Replace marks when the row's
+    /// candidate matches an existing library entry; otherwise the
+    /// cell is blank so the user has no ambiguous "is this checkbox
+    /// meaningful?" moment.
+    @ViewBuilder
+    private func replaceCell(for row: MatcherModel.Row, config: MatcherReplaceConfig) -> some View {
+        Group {
+            if config.isReplaceable(row) {
+                Toggle("", isOn: Binding(
+                    get: { config.isMarked(row) },
+                    set: { newValue in config.setMarked(row, newValue) }
+                ))
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .help("Delete the matching library copy (video + sidecars + wrapper folder) when this import moves over. The Match step's Next button will surface a confirmation dialog before you can advance.")
+            } else {
+                Text("—")
+                    .foregroundStyle(.tertiary)
+                    .help(row.candidate == nil
+                          ? "No TMDB candidate yet"
+                          : "No existing copy of this movie + edition in the library")
+            }
+        }
+        .frame(width: Self.replaceColumnWidth, alignment: .center)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder

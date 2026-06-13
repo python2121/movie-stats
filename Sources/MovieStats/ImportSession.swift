@@ -34,7 +34,7 @@ final class ImportSession: MovieScope {
     /// file path because the rename step rewrites paths and we need to
     /// re-key these alongside. The `confirmedYear` mirrors what the
     /// matcher locked in.
-    private(set) var tmdbMatches: [String: (tmdbID: Int, confirmedYear: Int?)] = [:]
+    private(set) var tmdbMatches: [String: (tmdbID: Int, confirmedYear: Int?, customEdition: String?)] = [:]
 
     /// Where we are in the wizard.
     var currentStep: Step = .pickDirectory
@@ -90,10 +90,22 @@ final class ImportSession: MovieScope {
         // already patched the relevant rows directly.
     }
 
-    func setTMDBMatch(forPath path: String, tmdbID: Int?, confirmedYear: Int?) throws {
+    func setTMDBMatch(
+        forPath path: String,
+        tmdbID: Int?,
+        confirmedYear: Int?,
+        customEdition: String?
+    ) throws {
         guard let idx = movies.firstIndex(where: { $0.path == path }) else { return }
+        // Normalize empty / whitespace-only editions to nil so a typed-
+        // then-cleared input doesn't leave an empty string lurking and
+        // later render as `{edition-}`.
+        let normalizedEdition: String? = customEdition
+            .flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
         movies[idx].tmdbId = tmdbID
         movies[idx].confirmedYear = confirmedYear
+        movies[idx].customEdition = normalizedEdition
         // Pull the canonical TMDB title/year forward so the in-memory
         // movie's `displayTitle` matches what the matcher locked in.
         // The detail is in the shared TMDB cache by the time the
@@ -104,7 +116,7 @@ final class ImportSession: MovieScope {
             movies[idx].imdbId = detail.imdbID
         }
         if let tmdbID {
-            tmdbMatches[path] = (tmdbID, confirmedYear)
+            tmdbMatches[path] = (tmdbID, confirmedYear, normalizedEdition)
         } else {
             tmdbMatches.removeValue(forKey: path)
         }
@@ -192,46 +204,109 @@ final class ImportSession: MovieScope {
 
     struct DuplicateConflict: Identifiable {
         let imported: MovieFile
-        /// Library copies matched to the same TMDB id (usually one, but a
-        /// library can hold accidental duplicates).
+        /// Library copies that share the imported file's (tmdbId,
+        /// customEdition) slot — same TMDB id AND same edition label
+        /// (nil / empty / whitespace all treated as "no edition"). A
+        /// different edition under the same TMDB id is *not* a
+        /// conflict; it's an alternate version Plex / Jellyfin would
+        /// keep alongside.
         let existing: [MovieFile]
         var id: String { imported.path }
     }
 
-    /// Imported movies whose confirmed TMDB id already exists in the live
-    /// library. Recomputed on demand so it stays current as matches are
-    /// confirmed or the library changes.
+    /// Normalizes a custom-edition label to a slot key. Whitespace and
+    /// case are folded so two visually-identical labels match even if
+    /// one was typed with a trailing space.
+    private static func slotEdition(_ raw: String?) -> String {
+        (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Imported movies whose `(tmdbId, customEdition)` slot already
+    /// exists in the live library. Recomputed on demand so it stays
+    /// current as matches are confirmed, editions are typed, or the
+    /// library changes.
     var duplicateConflicts: [DuplicateConflict] {
-        let byTMDB = Dictionary(
-            grouping: appModel.movies.filter { $0.tmdbId != nil },
-            by: { $0.tmdbId! }
-        )
+        // Group library by slot key so we can look each import up in
+        // O(1). Edition is normalized to the same canonical form on
+        // both sides so e.g. "Director's Cut " (with a trailing space)
+        // matches "Director's Cut".
+        var bySlot: [String: [MovieFile]] = [:]
+        for libraryMovie in appModel.movies {
+            guard let id = libraryMovie.tmdbId else { continue }
+            let key = "\(id)|\(Self.slotEdition(libraryMovie.customEdition))"
+            bySlot[key, default: []].append(libraryMovie)
+        }
         return movies.compactMap { movie in
-            guard let id = movie.tmdbId, let copies = byTMDB[id], !copies.isEmpty else {
-                return nil
-            }
+            guard let id = movie.tmdbId else { return nil }
+            let key = "\(id)|\(Self.slotEdition(movie.customEdition))"
+            guard let copies = bySlot[key], !copies.isEmpty else { return nil }
             return DuplicateConflict(imported: movie, existing: copies)
         }
     }
 
-    /// Deletes every library copy named in `duplicateConflicts` — the video,
-    /// its sidecar subtitles, and its wrapper folder when the folder belongs
-    /// to that movie alone — so the imported version can take its place.
-    /// Permanent deletes, per the app's no-Trash design.
+    // MARK: - Per-row Replace marks
+
+    /// Import source paths the user has explicitly checked "Replace" on
+    /// in the Match step. At Move-to-Library time these drive
+    /// `replaceExistingCopies` — the library copies in each marked
+    /// row's slot get permanently deleted before the new import moves
+    /// in. The Match-step Next button shows a confirmation dialog when
+    /// this set is non-empty so the user can't slip past unprompted.
+    private(set) var replaceMarkedPaths: Set<String> = []
+
+    /// Toggles a Replace mark for one imported file. Used by the
+    /// Matcher's Replace-column checkbox.
+    func setReplace(_ replace: Bool, forPath path: String) {
+        if replace {
+            replaceMarkedPaths.insert(path)
+        } else {
+            replaceMarkedPaths.remove(path)
+        }
+    }
+
+    /// Clears any Replace marks whose import row no longer resolves to
+    /// a real library duplicate — e.g. the user marked Replace, then
+    /// re-opened the search sheet and picked a *different* TMDB
+    /// candidate. Called from the Match-step Next handler so the
+    /// confirmation dialog only ever counts live deletions.
+    func pruneStaleReplaceMarks() {
+        let liveDuplicatePaths = Set(duplicateConflicts.map { $0.imported.path })
+        replaceMarkedPaths.formIntersection(liveDuplicatePaths)
+    }
+
+    /// Subset of `duplicateConflicts` whose import row the user has
+    /// actually checked Replace on. The Match-step confirmation
+    /// dialog itemizes these; Move-to-Library deletes from this list
+    /// and ignores any unmarked conflicts.
+    var pendingReplacements: [DuplicateConflict] {
+        let marks = replaceMarkedPaths
+        return duplicateConflicts.filter { marks.contains($0.imported.path) }
+    }
+
+    /// Deletes the library copies named by `pendingReplacements` — the
+    /// video, its sidecar subtitles, and its wrapper folder when the
+    /// folder belongs to that movie alone. Permanent deletes, per the
+    /// app's no-Trash design.
     func replaceExistingCopies() async {
-        guard let store = appModel.store, appModel.hasDirectory else { return }
         isBusy = true
         busyMessage = "Removing existing copies…"
         defer {
             isBusy = false
             busyMessage = ""
         }
+        await performReplacements()
+    }
 
+    /// The actual deletion work, factored out of `replaceExistingCopies`
+    /// so `moveToLibrary` can call it inline without fighting over the
+    /// `isBusy` flag.
+    private func performReplacements() async {
+        guard let store = appModel.store, appModel.hasDirectory else { return }
         let fm = FileManager.default
         let libraryRoot = URL(fileURLWithPath: appModel.directoryPath).standardizedFileURL.path
         var failures: [String] = []
 
-        for conflict in duplicateConflicts {
+        for conflict in pendingReplacements {
             for existing in conflict.existing {
                 let parent = URL(fileURLWithPath: existing.path).standardizedFileURL
                     .deletingLastPathComponent().path
@@ -306,6 +381,19 @@ final class ImportSession: MovieScope {
             busyMessage = ""
         }
 
+        // Honor any Replace marks the user committed at the Match step
+        // BEFORE touching the source files. Deletes the existing library
+        // wrapper / video / sidecars so the new copy can slot into the
+        // same canonical path on disk. Skipped when no marks are set;
+        // skipped per-row for marks that no longer resolve to a live
+        // duplicate (the user re-picked the TMDB candidate after
+        // marking).
+        if !replaceMarkedPaths.isEmpty {
+            busyMessage = "Removing existing copies…"
+            await performReplacements()
+            busyMessage = "Moving to library…"
+        }
+
         let fm = FileManager.default
         // Compute the in-scope top-level items: each tracked movie's first
         // path component beneath the source. Using a Set so two videos
@@ -332,7 +420,7 @@ final class ImportSession: MovieScope {
 
         // Track success: post-move path of each in-memory movie so we
         // can re-apply TMDB matches after the rescan.
-        var rekeyedMatches: [String: (tmdbID: Int, confirmedYear: Int?)] = [:]
+        var rekeyedMatches: [String: (tmdbID: Int, confirmedYear: Int?, customEdition: String?)] = [:]
         var failures: [String] = []
 
         for item in sortedItems {
@@ -390,7 +478,8 @@ final class ImportSession: MovieScope {
                 try? store.setTMDBMatch(
                     forPath: path,
                     tmdbID: match.tmdbID,
-                    confirmedYear: match.confirmedYear
+                    confirmedYear: match.confirmedYear,
+                    customEdition: match.customEdition
                 )
             }
             appModel.reloadFromStore()

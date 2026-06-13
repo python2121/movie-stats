@@ -95,6 +95,12 @@ final class MovieStore {
             ("watched_at", "REAL"),
             ("personal_rating", "INTEGER"),
             ("first_seen_at", "REAL"),
+            // User-typed edition label (e.g. "4K77 v1.4", "Director's Cut")
+            // applied at TMDB-match time. When set, the renamer emits
+            // `{edition-<value>}` into the canonical filename so Plex /
+            // Jellyfin can distinguish multiple cuts under the same
+            // wrapper folder. nil for the vast majority of rows.
+            ("custom_edition", "TEXT"),
         ]
         let needsFirstSeenBackfill = !present.contains("first_seen_at")
         let needsConfirmedYearBackfill = !present.contains("confirmed_year")
@@ -429,7 +435,8 @@ final class MovieStore {
                    m.confirmed_year,
                    m.watched_at, m.personal_rating,
                    t.genres_json, t.runtime, t.belongs_to_collection_json,
-                   m.first_seen_at, t.poster_path
+                   m.first_seen_at, t.poster_path,
+                   m.custom_edition
             FROM movies m
             LEFT JOIN tmdb_movies t ON m.tmdb_id = t.tmdb_id
             LEFT JOIN imdb_ratings r ON t.imdb_id = r.imdb_id
@@ -552,8 +559,13 @@ final class MovieStore {
     /// Doesn't touch the `tmdb_movies` row — caller persists the detail
     /// separately via `upsertTMDBDetail` (so multiple file copies of the
     /// same movie share one row in `tmdb_movies`).
-    func setTMDBMatch(forPath path: String, tmdbID: Int?, confirmedYear: Int?) throws {
-        let sql = "UPDATE movies SET tmdb_id = ?, confirmed_year = ? WHERE path = ?;"
+    func setTMDBMatch(
+        forPath path: String,
+        tmdbID: Int?,
+        confirmedYear: Int?,
+        customEdition: String?
+    ) throws {
+        let sql = "UPDATE movies SET tmdb_id = ?, confirmed_year = ?, custom_edition = ? WHERE path = ?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw MovieStoreError.prepare(lastErrorMessage())
@@ -569,7 +581,16 @@ final class MovieStore {
         } else {
             sqlite3_bind_null(stmt, 2)
         }
-        sqlite3_bind_text(stmt, 3, path, -1, SQLITE_TRANSIENT)
+        // Empty-string editions collapse to NULL so a typed-then-cleared
+        // input doesn't leave an empty-but-non-nil value behind that
+        // would later render as `{edition-}`.
+        let trimmedEdition = customEdition?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedEdition, !trimmedEdition.isEmpty {
+            sqlite3_bind_text(stmt, 3, trimmedEdition, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 3)
+        }
+        sqlite3_bind_text(stmt, 4, path, -1, SQLITE_TRANSIENT)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw MovieStoreError.exec(lastErrorMessage())
         }
@@ -743,6 +764,7 @@ final class MovieStore {
         movie.collectionName = collection?.name
         movie.firstSeenAt = readNullableDouble(stmt, 39).map { Date(timeIntervalSince1970: $0) }
         movie.posterPath = readNullableText(stmt, 40)
+        movie.customEdition = readNullableText(stmt, 41)
         return movie
     }
 

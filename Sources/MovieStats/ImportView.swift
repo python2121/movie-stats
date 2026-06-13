@@ -19,7 +19,10 @@ struct ImportView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var session: ImportSession?
-    @State private var showReplaceConfirm = false
+    /// Drives the Match-step Next confirmation dialog. The Match button
+    /// can only advance once the user OKs every existing-library
+    /// deletion they queued via the Replace column.
+    @State private var showMatchReplaceConfirm = false
 
     /// Outer frame defaults for the wizard window. The matcher and
     /// rename inner panels happily fill more space, so we go large.
@@ -41,6 +44,79 @@ struct ImportView: View {
             if session == nil { session = ImportSession(appModel: appModel) }
         }
         .onExitCommand { dismiss() }
+        .confirmationDialog(
+            matchReplaceDialogTitle(),
+            isPresented: $showMatchReplaceConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Confirm and continue", role: .destructive) {
+                session?.advance()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(matchReplaceDialogMessage())
+        }
+    }
+
+    /// Title for the Match-step Replace confirmation dialog — counts
+    /// the library copies that'll be deleted when Move-to-Library
+    /// runs. Pre-filters via `pendingReplacements` so any stale marks
+    /// the user left on rows whose TMDB candidate later changed don't
+    /// inflate the count.
+    private func matchReplaceDialogTitle() -> String {
+        let conflicts = session?.pendingReplacements ?? []
+        let count = conflicts.reduce(0) { $0 + $1.existing.count }
+        if count == 0 { return "Confirm" }
+        return "Permanently delete \(count) library cop\(count == 1 ? "y" : "ies")?"
+    }
+
+    /// Body text for the Match-step Replace confirmation dialog —
+    /// lists each library file we're about to delete so the user can
+    /// see exactly what disappears. Cap the list at a sensible length
+    /// to keep the dialog from running off-screen on big batches.
+    private func matchReplaceDialogMessage() -> String {
+        let conflicts = session?.pendingReplacements ?? []
+        let allPaths = conflicts.flatMap { $0.existing }.map(\.path)
+        let preview = allPaths.prefix(8)
+        var lines: [String] = preview.map { "• \($0)" }
+        if allPaths.count > preview.count {
+            lines.append("…and \(allPaths.count - preview.count) more.")
+        }
+        let intro = "Move to Library will permanently delete these library copies — video, sidecars, and the wrapper folder when it's exclusive — before the imported versions take their place. Files are not sent to the Trash."
+        return intro + "\n\n" + lines.joined(separator: "\n")
+    }
+
+    /// Bridges the import session into the matcher's per-row Replace
+    /// column. The closures read / write the session's
+    /// `replaceMarkedPaths` set; the eligibility check uses the
+    /// edition-aware `duplicateConflicts` so changing the TMDB
+    /// candidate or typing a new edition flips the checkbox state
+    /// without the matcher needing to know about the session itself.
+    private func makeReplaceConfig(session: ImportSession) -> MatcherReplaceConfig {
+        let duplicatePaths: Set<String> = Set(session.duplicateConflicts.map { $0.imported.path })
+        return MatcherReplaceConfig(
+            isReplaceable: { row in duplicatePaths.contains(row.path) },
+            isMarked: { row in session.replaceMarkedPaths.contains(row.path) },
+            setMarked: { row, value in session.setReplace(value, forPath: row.path) }
+        )
+    }
+
+    /// Handler for the wizard footer's Next button. Adds a Match-step
+    /// guard: if the user marked any Replace boxes, surface a
+    /// confirmation dialog itemizing what'll be deleted before letting
+    /// the wizard advance past Match. Every other step advances
+    /// straight through.
+    private func handleNext(session: ImportSession) {
+        // Drop any Replace marks the user toggled on, then re-picked
+        // a different TMDB candidate that doesn't conflict anymore.
+        // Without this the dialog could promise a deletion that
+        // never fires.
+        session.pruneStaleReplaceMarks()
+        if session.currentStep == .match, !session.replaceMarkedPaths.isEmpty {
+            showMatchReplaceConfirm = true
+        } else {
+            session.advance()
+        }
     }
 
     @ViewBuilder
@@ -138,8 +214,12 @@ struct ImportView: View {
         case .pickDirectory:
             pickPanel(session: session)
         case .match:
-            embeddedSection(title: "Match each scanned file to TMDB. Confirmed matches drop off the list.") {
-                MatcherView(scopedScope: session, embedded: true)
+            embeddedSection(title: "Match each scanned file to TMDB. Confirmed matches drop off the list. Check Replace for any row whose match already lives in the library — you'll confirm the deletions before advancing.") {
+                MatcherView(
+                    scopedScope: session,
+                    embedded: true,
+                    replaceConfig: makeReplaceConfig(session: session)
+                )
             }
         case .images:
             embeddedSection(title: "Delete image files (posters, screenshots, etc.) you don't want to keep with the movie.") {
@@ -300,11 +380,11 @@ struct ImportView: View {
                         .frame(width: 240)
                 }
                 Button {
-                    if session.duplicateConflicts.isEmpty {
-                        Task { await session.moveToLibrary() }
-                    } else {
-                        showReplaceConfirm = true
-                    }
+                    // Replace marks (and the user's confirmation of
+                    // them) were captured at the Match step's Next
+                    // click. `moveToLibrary` will honor them inline
+                    // before the file moves — no second prompt here.
+                    Task { await session.moveToLibrary() }
                 } label: {
                     Label("Move to Library", systemImage: "tray.and.arrow.up")
                         .font(.body.weight(.semibold))
@@ -315,26 +395,6 @@ struct ImportView: View {
             }
         }
         .padding(20)
-        .confirmationDialog(
-            replaceDialogTitle(session: session),
-            isPresented: $showReplaceConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Replace and Move", role: .destructive) {
-                Task {
-                    await session.replaceExistingCopies()
-                    await session.moveToLibrary()
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The library's current copies — each video, its subtitles, and its folder — are permanently deleted, then the imported versions move in. Files are not sent to the Trash.")
-        }
-    }
-
-    private func replaceDialogTitle(session: ImportSession) -> String {
-        let existingCount = session.duplicateConflicts.reduce(0) { $0 + $1.existing.count }
-        return "Replace \(existingCount) existing cop\(existingCount == 1 ? "y" : "ies") in the library?"
     }
 
     /// Warning block on the Ready step listing imported movies that are
@@ -431,7 +491,7 @@ struct ImportView: View {
                     session.jump(to: .pickDirectory)
                 }
             }
-            .buttonStyle(.borderless)
+            .controlSize(.large)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -456,7 +516,7 @@ struct ImportView: View {
             }
             if session.currentStep != .pickDirectory, session.currentStep != .ready, session.currentStep != .done {
                 Button {
-                    session.advance()
+                    handleNext(session: session)
                 } label: {
                     HStack {
                         Text("Next")
