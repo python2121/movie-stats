@@ -101,6 +101,13 @@ final class MovieStore {
             // Jellyfin can distinguish multiple cuts under the same
             // wrapper folder. nil for the vast majority of rows.
             ("custom_edition", "TEXT"),
+            // Multi-disc / multi-part number parsed from the filename's
+            // `cd<N>` / `disc<N>` / `disk<N>` / `pt<N>` / `part<N>` /
+            // `dvd<N>` token. When set, the renamer emits `- pt<N>`
+            // into the canonical filename and the library row groups
+            // all parts of the same (tmdbId, customEdition) into one
+            // entry. nil for single-file movies (the common case).
+            ("part_number", "INTEGER"),
         ]
         let needsFirstSeenBackfill = !present.contains("first_seen_at")
         let needsConfirmedYearBackfill = !present.contains("confirmed_year")
@@ -299,14 +306,15 @@ final class MovieStore {
             // it's stamped once when the path first appears and survives
             // every subsequent rescan, powering the "Recently Added" sort.
             let upsertSQL = """
-                INSERT INTO movies (path, filename, size, date_scanned, parsed_title, parsed_year, first_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO movies (path, filename, size, date_scanned, parsed_title, parsed_year, first_seen_at, part_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     filename = excluded.filename,
                     size = excluded.size,
                     date_scanned = excluded.date_scanned,
                     parsed_title = excluded.parsed_title,
-                    parsed_year = excluded.parsed_year;
+                    parsed_year = excluded.parsed_year,
+                    part_number = excluded.part_number;
                 """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, upsertSQL, -1, &stmt, nil) == SQLITE_OK else {
@@ -327,6 +335,11 @@ final class MovieStore {
                     sqlite3_bind_null(stmt, 6)
                 }
                 sqlite3_bind_double(stmt, 7, now)
+                if let part = parsed.partNumber {
+                    sqlite3_bind_int(stmt, 8, Int32(part))
+                } else {
+                    sqlite3_bind_null(stmt, 8)
+                }
                 guard sqlite3_step(stmt) == SQLITE_DONE else {
                     throw MovieStoreError.exec(lastErrorMessage())
                 }
@@ -454,7 +467,8 @@ final class MovieStore {
                    m.watched_at, m.personal_rating,
                    t.genres_json, t.runtime, t.belongs_to_collection_json,
                    m.first_seen_at, t.poster_path,
-                   m.custom_edition
+                   m.custom_edition,
+                   m.part_number
             FROM movies m
             LEFT JOIN tmdb_movies t ON m.tmdb_id = t.tmdb_id
             LEFT JOIN imdb_ratings r ON t.imdb_id = r.imdb_id
@@ -783,6 +797,7 @@ final class MovieStore {
         movie.firstSeenAt = readNullableDouble(stmt, 39).map { Date(timeIntervalSince1970: $0) }
         movie.posterPath = readNullableText(stmt, 40)
         movie.customEdition = readNullableText(stmt, 41)
+        movie.partNumber = readNullableInt(stmt, 42)
         return movie
     }
 

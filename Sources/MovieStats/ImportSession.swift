@@ -198,7 +198,7 @@ final class ImportSession: MovieScope {
         let now = Date()
         movies = scanned.map { file in
             let parsed = TitleParser.parse(filename: file.filename)
-            return MovieFile(
+            var movie = MovieFile(
                 path: file.path,
                 filename: file.filename,
                 size: file.size,
@@ -206,6 +206,14 @@ final class ImportSession: MovieScope {
                 parsedTitle: parsed.title,
                 parsedYear: parsed.year
             )
+            // The TitleParser pulls a part number out of multi-disc
+            // filenames (`DISC1`, `cd2`, `pt 3`, …) but the
+            // memberwise init only takes the title + year. Without
+            // this line, multi-disc imports lose their part number,
+            // the renamer can't emit `- pt<N>`, and both discs
+            // collide on the same canonical path.
+            movie.partNumber = parsed.partNumber
+            return movie
         }
         if currentStep == .pickDirectory, !movies.isEmpty {
             currentStep = .match

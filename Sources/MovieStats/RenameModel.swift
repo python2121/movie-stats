@@ -302,7 +302,8 @@ final class RenameModel {
                 year: year,
                 tmdbID: tmdbID,
                 customEdition: movie.customEdition,
-                qualityTag: soloQualityTag
+                qualityTag: soloQualityTag,
+                partNumber: movie.partNumber
             )
             let newFilename = ext.isEmpty ? fileBase : "\(fileBase).\(ext)"
             let newFolderPath = (containerDir as NSString).appendingPathComponent(folderName)
@@ -382,6 +383,14 @@ final class RenameModel {
         // canonical paths and Plex/Jellyfin see them as alternate
         // versions of one library entry. Solo rows (groups of 1) are
         // untouched, preserving the existing single-version naming.
+        // Grouping key now includes part number — a 4K and a 1080p of
+        // the SAME disc are alternate qualities of one slot (and
+        // should get a [qualityTag]); disc 1 vs disc 2 of the same
+        // movie are different slots and should NOT trigger the
+        // suffix (their canonical names already differ via ` - pt<N>`).
+        let moviesByPath: [String: MovieFile] = Dictionary(
+            uniqueKeysWithValues: scope.movies.map { ($0.path, $0) }
+        )
         var slotIndices: [String: [Int]] = [:]
         for (i, row) in newRows.enumerated() {
             // Extras share their parent's tmdbId but aren't
@@ -390,12 +399,10 @@ final class RenameModel {
             // Other/ folder.
             if row.extraInfo != nil { continue }
             let editionKey = row.customEdition ?? ""
-            let key = "\(row.tmdbId)|\(editionKey)"
+            let partKey = moviesByPath[row.path]?.partNumber.map(String.init) ?? ""
+            let key = "\(row.tmdbId)|\(editionKey)|\(partKey)"
             slotIndices[key, default: []].append(i)
         }
-        let moviesByPath: [String: MovieFile] = Dictionary(
-            uniqueKeysWithValues: scope.movies.map { ($0.path, $0) }
-        )
         for (_, indices) in slotIndices where indices.count > 1 {
             for idx in indices {
                 let row = newRows[idx]
@@ -414,7 +421,8 @@ final class RenameModel {
                     year: year,
                     tmdbID: row.tmdbId,
                     customEdition: row.customEdition,
-                    qualityTag: qualityTag
+                    qualityTag: qualityTag,
+                    partNumber: movie.partNumber
                 )
                 let ext = (row.currentFilename as NSString).pathExtension
                 let newFilename = ext.isEmpty ? newBase : "\(newBase).\(ext)"
@@ -449,11 +457,22 @@ final class RenameModel {
         // multi-quality post-pass so every parent's newFolderPath is
         // final by the time we read it. Standalone Rename Library
         // never sees these (its scope returns empty).
-        let parentRowsByTMDB: [Int: Int] = Dictionary(
-            uniqueKeysWithValues: newRows.enumerated().compactMap { (idx, row) in
-                row.extraInfo == nil ? (row.tmdbId, idx) : nil
+        //
+        // Build the parent lookup manually rather than via
+        // `uniqueKeysWithValues:` — multi-part movies have several
+        // rows sharing one tmdbId (one per disc), so the unique-key
+        // constructor would trap on the duplicate. Any of those
+        // rows works equivalently as the "parent row" here because
+        // every part shares the same wrapper folder (and thus the
+        // same `Other/` destination); first-write-wins picks the
+        // top-quality / lowest-part row deterministically from the
+        // already-sorted plan.
+        var parentRowsByTMDB: [Int: Int] = [:]
+        for (idx, row) in newRows.enumerated() where row.extraInfo == nil {
+            if parentRowsByTMDB[row.tmdbId] == nil {
+                parentRowsByTMDB[row.tmdbId] = idx
             }
-        )
+        }
         for extra in scope.pendingExtras {
             guard let parentIdx = parentRowsByTMDB[extra.parentTMDBId] else { continue }
             let parentRow = newRows[parentIdx]

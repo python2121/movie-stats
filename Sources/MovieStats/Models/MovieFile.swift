@@ -79,6 +79,15 @@ struct MovieFile: Identifiable, Hashable, Sendable {
     /// `movies.custom_edition`.
     var customEdition: String?
 
+    /// Disc / part number extracted from the filename's `cd<N>` /
+    /// `disc<N>` / `disk<N>` / `pt<N>` / `part<N>` / `dvd<N>` token,
+    /// when present. Drives the multi-part collapse in the library
+    /// list (parts of one movie share a row, with a Play menu that
+    /// labels each disc) and the `- pt<N>` suffix the renamer emits.
+    /// nil for single-file movies (the common case). Stored in
+    /// `movies.part_number`.
+    var partNumber: Int?
+
     /// Year to use when rendering this movie everywhere outside of the
     /// matcher itself. Precedence: matcher's locked-in confirmation →
     /// TMDB's preferred-release year → filename-parsed year.

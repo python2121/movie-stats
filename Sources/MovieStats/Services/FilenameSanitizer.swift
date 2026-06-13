@@ -84,7 +84,8 @@ enum FilenameSanitizer {
         year: Int?,
         tmdbID: Int,
         customEdition: String? = nil,
-        qualityTag: String? = nil
+        qualityTag: String? = nil,
+        partNumber: Int? = nil
     ) -> String {
         var base = folderName(title: title, year: year, tmdbID: tmdbID)
         // Edition is sanitized through the same path-safety pass as the
@@ -101,6 +102,13 @@ enum FilenameSanitizer {
             if !sanitized.isEmpty {
                 base += " [\(sanitized)]"
             }
+        }
+        // Multi-disc / multi-part suffix in Plex / Jellyfin's
+        // recognized `- pt<N>` form. Placed last so a 4K + 1080p
+        // of the same disc still composes as
+        // `Title (Year) {tmdb-N} [4K Remux] - pt1.mkv`.
+        if let partNumber {
+            base += " - pt\(partNumber)"
         }
         return base
     }

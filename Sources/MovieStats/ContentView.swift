@@ -415,15 +415,25 @@ struct ContentView: View {
     }
 
     /// Per-copy label used inside the Play menu of a multi-quality
-    /// row. Format: `<type> · <size>` (e.g. "4K Remux · 78 GB"),
-    /// falling back to the filename when `movie_type` isn't set yet
-    /// (an unprobed row, basically).
+    /// or multi-part row. Composed as
+    /// `[Part N · ][type · ]<size>`, with parts shown first because
+    /// disc selection usually trumps quality selection when both
+    /// dimensions vary. Falls back to the filename when `movie_type`
+    /// isn't set yet (an unprobed row, basically).
     private func playMenuLabel(for file: MovieFile) -> String {
-        let size = ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)
-        if let type = file.movieType, type != MovieType.unknown.rawValue {
-            return "\(type) · \(size)"
+        var pieces: [String] = []
+        if let part = file.partNumber {
+            pieces.append("Part \(part)")
         }
-        return "\(file.filename) · \(size)"
+        if let type = file.movieType, type != MovieType.unknown.rawValue {
+            pieces.append(type)
+        } else if file.partNumber == nil {
+            // Unprobed solo file — fall back to filename so the menu
+            // item isn't just a size with no context.
+            pieces.append(file.filename)
+        }
+        pieces.append(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
+        return pieces.joined(separator: " · ")
     }
 
     @ViewBuilder
@@ -555,6 +565,10 @@ struct ContentView: View {
     private func chips(for row: MovieRow) -> some View {
         if let edition = row.customEdition, !edition.isEmpty {
             Chip(text: edition, color: .indigo)
+        }
+        if row.isMultiPart {
+            Chip(text: "\(row.partNumbers.count) parts", color: .pink)
+                .help("Multi-disc release — \(row.partNumbers.count) parts of the same movie. Plex / Jellyfin play them back-to-back; the row's Play menu lets you pick a specific disc.")
         }
         ForEach(row.movieTypes, id: \.self) { type in
             Chip(text: type, color: .blue)
@@ -755,7 +769,19 @@ struct ContentView: View {
         return order.enumerated().map { idx, key in
             let files = groups[key]!
             let rep = files.max(by: { $0.size < $1.size }) ?? files[0]
-            return MovieRow(rank: idx + 1, representative: rep, allFiles: files)
+            // Order parts ascending, then qualities largest-first, so
+            // the Play menu reads Part 1 → Part 2 → … with each
+            // part's best quality at the top. Solo files have no part
+            // number and fall through to size sort.
+            let sorted = files.sorted { a, b in
+                switch (a.partNumber, b.partNumber) {
+                case let (lhs?, rhs?) where lhs != rhs: return lhs < rhs
+                case (nil, _?): return false
+                case (_?, nil): return true
+                default: return a.size > b.size
+                }
+            }
+            return MovieRow(rank: idx + 1, representative: rep, allFiles: sorted)
         }
     }
 
@@ -1138,11 +1164,11 @@ private struct MovieDetailSheet: View {
     @State private var selectedFileID: String?
 
     /// Every on-disk file that belongs to the same library row as
-    /// `seedMovie` — same TMDB id, same custom edition. Sorted
-    /// largest-first so the switcher reads "best quality → fallback"
-    /// regardless of which file the user clicked into.
-    /// Unmatched seeds return just themselves (no siblings to group
-    /// with).
+    /// `seedMovie` — same TMDB id, same custom edition. Sorted parts
+    /// ascending first, then qualities largest-first, so the
+    /// switcher reads `Part 1 → Part 2 → …` with each part's best
+    /// quality on top. Unmatched seeds return just themselves (no
+    /// siblings to group with).
     private var groupFiles: [MovieFile] {
         guard let tmdbId = seedMovie.tmdbId else { return [seedMovie] }
         let editionSlot: (String?) -> String = {
@@ -1152,7 +1178,15 @@ private struct MovieDetailSheet: View {
         let siblings = appModel.movies.filter {
             $0.tmdbId == tmdbId && editionSlot($0.customEdition) == seedEdition
         }
-        return siblings.isEmpty ? [seedMovie] : siblings.sorted { $0.size > $1.size }
+        if siblings.isEmpty { return [seedMovie] }
+        return siblings.sorted { a, b in
+            switch (a.partNumber, b.partNumber) {
+            case let (lhs?, rhs?) where lhs != rhs: return lhs < rhs
+            case (nil, _?): return false
+            case (_?, nil): return true
+            default: return a.size > b.size
+            }
+        }
     }
 
     /// The file every per-file detail (grid, audio/subtitle tracks,
@@ -1466,6 +1500,9 @@ private struct MovieDetailSheet: View {
             fromByteCount: file.size, countStyle: .file
         )
         HStack(spacing: 6) {
+            if let part = file.partNumber {
+                Chip(text: "Part \(part)", color: .pink)
+            }
             if let type = file.movieType, type != MovieType.unknown.rawValue {
                 Chip(text: type, color: .secondary)
             }
@@ -2218,6 +2255,17 @@ struct MovieRow: Identifiable {
         Array(Set(allFiles.compactMap(\.hdrFormat))).sorted()
     }
     var any10Bit: Bool { allFiles.contains(where: { $0.is10Bit }) }
+
+    /// Unique disc / part numbers present in the group, sorted. A row
+    /// containing only single-file movies returns `[]`; a 2-disc set
+    /// returns `[1, 2]`. Drives the multi-part chip + Play menu.
+    var partNumbers: [Int] {
+        Array(Set(allFiles.compactMap(\.partNumber))).sorted()
+    }
+    /// True iff this row spans multiple discs / parts of the same
+    /// movie. Mixed groups (some files with parts, some without) also
+    /// count — they're still a multi-part presentation.
+    var isMultiPart: Bool { partNumbers.count >= 2 }
 }
 
 /// Compact stat tile used in the narrow left column. Icon + small caption +
