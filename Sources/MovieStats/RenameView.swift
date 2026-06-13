@@ -264,6 +264,10 @@ struct RenameView: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                     .help(row.currentDisplay)
+                if row.extraInfo != nil {
+                    StatusChip(text: "extra", color: .pink)
+                        .help("Bonus video the user flagged at Multi-Videos. Apply moves it into the parent movie's `Other/` subfolder and pulls any sibling sidecar subtitles along; Move to Library then records it in the `extras` table.")
+                }
                 if row.duplicateConflict {
                     StatusChip(text: "duplicate", color: .red)
                         .help("Another row targets the same canonical path (likely two source files matched to the same TMDB id). Unchecked by default — reconcile before Apply: delete the redundant copy or re-match one to a different movie.")
@@ -301,20 +305,49 @@ struct RenameView: View {
     /// Right-hand cell: proposed folder + video file + every subtitle's
     /// proposed location, all in canonical form. Mirrors the structure of
     /// the current cell so the user can scan both sides line-by-line.
+    /// Extras rows get one extra line for the `Other/` subfolder so the
+    /// move target reads as `wrapper / Other / filename` — three
+    /// indented lines instead of two.
     @ViewBuilder
     private func proposedCell(for row: RenameModel.Row) -> some View {
-        let (folder, filename) = splitProposedPath(row.proposedDisplay)
         VStack(alignment: .leading, spacing: 2) {
-            Text("/" + folder)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            Text("/" + filename)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-                .padding(.leading, 12)
+            if row.extraInfo != nil {
+                // For extras the path is `<wrapper>/Other/<filename>`;
+                // splitting at the LAST slash would show
+                // `<wrapper>/Other` as one folder line, hiding the
+                // `Other/` boundary. Split twice so each level
+                // renders on its own indent and the structure is
+                // obvious at a glance.
+                let parts = splitExtraProposedPath(row.proposedDisplay)
+                Text("/" + parts.wrapper)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text("/" + parts.subfolder)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.leading, 12)
+                Text("/" + parts.filename)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .padding(.leading, 24)
+            } else {
+                let (folder, filename) = splitProposedPath(row.proposedDisplay)
+                Text("/" + folder)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text("/" + filename)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .padding(.leading, 12)
+            }
             ForEach(row.subtitles) { sub in
                 HStack(spacing: 4) {
                     Text("/" + subtitleDisplayName(path: sub.newPath))
@@ -324,13 +357,33 @@ struct RenameView: View {
                         .textSelection(.enabled)
                     proposedSubtitleAnnotation(sub)
                 }
-                .padding(.leading, 12)
+                .padding(.leading, row.extraInfo == nil ? 12 : 24)
             }
         }
         .help(row.proposedDisplay)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Three-way split of an extras row's proposedDisplay into
+    /// `<wrapper>/<subfolder>/<filename>`. Always uses the LAST two
+    /// slashes — anything earlier collapses into the wrapper segment
+    /// (defensive against future categories beyond `Other/`).
+    private func splitExtraProposedPath(_ path: String)
+        -> (wrapper: String, subfolder: String, filename: String)
+    {
+        guard let lastSlash = path.lastIndex(of: "/") else {
+            return ("", "", path)
+        }
+        let filename = String(path[path.index(after: lastSlash)...])
+        let head = String(path[..<lastSlash])
+        guard let priorSlash = head.lastIndex(of: "/") else {
+            return ("", head, filename)
+        }
+        let wrapper = String(head[..<priorSlash])
+        let subfolder = String(head[head.index(after: priorSlash)...])
+        return (wrapper, subfolder, filename)
     }
 
     /// Inline annotation rendered next to a proposed subtitle path —

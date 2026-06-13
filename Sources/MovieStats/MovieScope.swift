@@ -1,5 +1,48 @@
 import Foundation
 
+/// One pending extras relocation the RenameModel should fold into its
+/// plan. The import wizard's Multi-Videos step builds these from the
+/// user's Extra checkboxes; the standalone library scope returns none.
+struct ExtraRenameRequest: Equatable {
+    /// The extra's marking-time path. Same key used by
+    /// `session.movies` for that file, so the rename model can locate
+    /// + update it just like a regular movie row.
+    let markedPath: String
+    /// Basename to use as the final filename inside `Other/`. Not
+    /// canonicalized today — the bonus-content folder name is the
+    /// classifier in Plex/Jellyfin; arbitrary names are accepted.
+    let filename: String
+    /// File size, captured at marking time so we don't re-stat just
+    /// to write the post-move DB row.
+    let size: Int64
+    /// TMDB id of the parent movie. Used to look up the parent's
+    /// rename row at plan time so the extra's target path can land
+    /// inside the parent's *post-rename* wrapper.
+    let parentTMDBId: Int
+    /// Path relative to the parent movie's containing folder at
+    /// marking time. Carries any intermediate subfolders (e.g.
+    /// `Extras-Grym/Doc.mkv`) so move-time discovery resolves the
+    /// file even if the parent's wrapper has since been renamed.
+    let relativeToParentDir: String
+}
+
+/// What RenameModel reports back to the scope after successfully
+/// relocating an extra. The scope keeps this around so a later step
+/// (Move to Library) can finalize the DB insert under the file's
+/// post-move library path.
+struct ExtraRelocationOutcome: Equatable {
+    /// Source-side path right after the relocation move — sits inside
+    /// the parent's wrapper's `Other/` folder, ready to ride along
+    /// when the wrapper itself moves to the library.
+    let sourceAfterMove: String
+    /// Parent movie's current source-side path, used as the second
+    /// half of the eventual library-path swap.
+    let parentSourcePath: String
+    let parentTMDBId: Int
+    let filename: String
+    let size: Int64
+}
+
 /// The minimum interface a "library context" needs to provide to the
 /// matcher and rename models so they can operate against *some* set of
 /// movies without caring whether that set lives in the persistent
@@ -40,6 +83,22 @@ protocol MovieScope: AnyObject {
     /// on disk. Live scope writes it through to the DB; import scope
     /// updates the in-memory entry so subsequent steps see the new path.
     func updatePath(oldPath: String, newPath: String, newFilename: String) throws
+    /// Extras the rename step should plan + execute as first-class
+    /// rows. Standalone library scope returns empty; ImportSession
+    /// derives one entry per Extra checkbox from the Multi-Videos
+    /// step.
+    var pendingExtras: [ExtraRenameRequest] { get }
+    /// Reports back when an extras row's relocation succeeded so the
+    /// scope can finalize bookkeeping (e.g. ImportSession needs the
+    /// outcome at Move-to-Library time to write the `extras` table
+    /// row under the file's final library path). Standalone scopes
+    /// treat as no-op.
+    func recordExtraRelocation(_ outcome: ExtraRelocationOutcome)
+}
+
+extension MovieScope {
+    var pendingExtras: [ExtraRenameRequest] { [] }
+    func recordExtraRelocation(_ outcome: ExtraRelocationOutcome) {}
 }
 
 extension AppModel: MovieScope {

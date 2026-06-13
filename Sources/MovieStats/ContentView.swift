@@ -1121,6 +1121,13 @@ private struct MovieDetailSheet: View {
     @Environment(AppModel.self) private var appModel
     @State private var tmdbState: TMDBState = .idle
     @State private var externalSubtitles: [SubtitleFile] = []
+    /// Bonus videos (deleted scenes, featurettes, etc.) attributed to
+    /// any library file sharing this movie's TMDB id — unioned
+    /// across alternate editions (Theatrical / Director's Cut /
+    /// Despecialized) since extras belong to the *movie*, not to a
+    /// specific cut. Loaded on appear; the file switcher above
+    /// shouldn't change what shows here.
+    @State private var extras: [ExtraFile] = []
     @State private var isWatched = false
     @State private var personalStars = 0
     @State private var fetchingTrailer = false
@@ -1224,6 +1231,11 @@ private struct MovieDetailSheet: View {
                             .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
 
+                    if !extras.isEmpty {
+                        Divider()
+                        extrasTable
+                    }
+
                     // Audio + subtitle tracks side by side. When only one
                     // side has data, drop the divider and let it take the
                     // full width on its own.
@@ -1302,6 +1314,36 @@ private struct MovieDetailSheet: View {
             personalStars = movie.personalRating ?? 0
             guard let store = appModel.store else { return }
             externalSubtitles = (try? store.subtitleFiles(forMoviePath: movie.path)) ?? []
+            // Extras are attributed at import time to a *specific*
+            // matched movie file. The library may have several files
+            // for the same TMDB id (4K + 1080p of the same edition
+            // collapse into one row via `groupFiles`; alternate
+            // *editions* like Director's Cut stay as their own
+            // rows). Either way the extras belong to the movie, not
+            // to a cut — walk every library file sharing this TMDB
+            // id, union their attributed rows, and dedupe by path.
+            // Unmatched seed → just this file's attributed extras
+            // (typically empty).
+            var seen = Set<String>()
+            var collected: [ExtraFile] = []
+            let lookupPaths: [String]
+            if let tmdbID = seedMovie.tmdbId {
+                lookupPaths = appModel.movies
+                    .filter { $0.tmdbId == tmdbID }
+                    .map(\.path)
+            } else {
+                lookupPaths = [seedMovie.path]
+            }
+            for lookupPath in lookupPaths {
+                let rows = (try? store.extras(forMoviePath: lookupPath)) ?? []
+                for row in rows where !seen.contains(row.path) {
+                    seen.insert(row.path)
+                    collected.append(row)
+                }
+            }
+            extras = collected.sorted {
+                $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
+            }
         }
     }
 
@@ -1553,6 +1595,60 @@ private struct MovieDetailSheet: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .help(sub.path)
+                    }
+                    .font(.callout)
+                    .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    /// Bonus videos parked in the movie's `Other/` (or future
+    /// category) subfolder. Surfaced from the `extras` table that
+    /// the import wizard's Rename step writes. Each row gets a Play
+    /// button that launches the file in the external player.
+    private var extrasTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Extras (\(extras.count))")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                GridRow {
+                    Text("#").gridColumnAlignment(.trailing)
+                    Text("Category")
+                    Text("Size").gridColumnAlignment(.trailing)
+                    Text("File")
+                    Text("").gridColumnAlignment(.center)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                Divider().gridCellUnsizedAxes(.horizontal)
+
+                ForEach(Array(extras.enumerated()), id: \.element.id) { idx, extra in
+                    GridRow {
+                        Text("\(idx + 1)")
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Text(extra.category)
+                        Text(ByteCountFormatter.string(fromByteCount: extra.size, countStyle: .file))
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .gridColumnAlignment(.trailing)
+                        Text(extra.filename)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(extra.path)
+                        Button {
+                            ExternalPlayer.play(path: extra.path)
+                        } label: {
+                            Image(systemName: "play.circle")
+                                .imageScale(.medium)
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Play \(extra.filename)")
+                        .help("Play in \(ExternalPlayer.playerName)")
                     }
                     .font(.callout)
                     .textSelection(.enabled)

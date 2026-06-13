@@ -84,7 +84,29 @@ final class RenameModel {
             /// Movie was loose at the scan root — create a wrapping folder
             /// and move the file into it.
             case createFolderAndMove
+            /// An extra video being relocated into its parent movie's
+            /// `Other/` subfolder. Only generated when the scope
+            /// returns non-empty `pendingExtras` (the import wizard
+            /// after the user checked Extra in Multi-Videos).
+            case moveToOther
         }
+
+        /// Extras-specific metadata, populated only when `plan == .moveToOther`.
+        /// Lets `apply()` find the file in either of its possible
+        /// homes (parent's renamed wrapper, or source root for loose
+        /// extras) and report back to the scope after the move so
+        /// ImportSession can finalize the DB row at Move-to-Library
+        /// time.
+        struct ExtraInfo: Equatable {
+            let parentTMDBId: Int
+            /// Path relative to the parent's containing folder at
+            /// marking time. Drives the apply-time discovery: try
+            /// `<parent's new wrapper>/<relativeToParentDir>` first,
+            /// fall back to `<source root>/<relativeToParentDir>`.
+            let relativeToParentDir: String
+            let size: Int64
+        }
+        var extraInfo: ExtraInfo? = nil
     }
 
     /// One sibling subtitle file (or one entry inside a `Subs/`-style
@@ -309,6 +331,12 @@ final class RenameModel {
                     newStem: newStem,
                     candidates: rootSubtitleIndex
                 )
+            case .moveToOther:
+                // Unreachable — this branch is only entered for
+                // matched-movie rows, which never get a .moveToOther
+                // plan (that's reserved for the extras pass that
+                // appends rows further below).
+                subtitles = []
             }
 
             // Already canonical and no subtitle work to do — skip. Both
@@ -356,6 +384,11 @@ final class RenameModel {
         // untouched, preserving the existing single-version naming.
         var slotIndices: [String: [Int]] = [:]
         for (i, row) in newRows.enumerated() {
+            // Extras share their parent's tmdbId but aren't
+            // alternate-quality copies of the parent — skip them so
+            // the [qualityTag] suffix logic doesn't reach into the
+            // Other/ folder.
+            if row.extraInfo != nil { continue }
             let editionKey = row.customEdition ?? ""
             let key = "\(row.tmdbId)|\(editionKey)"
             slotIndices[key, default: []].append(i)
@@ -411,6 +444,80 @@ final class RenameModel {
             }
         }
 
+        // Extras pass — appends one row per Extra checkbox from the
+        // import wizard's Multi-Videos step. Runs *after* the
+        // multi-quality post-pass so every parent's newFolderPath is
+        // final by the time we read it. Standalone Rename Library
+        // never sees these (its scope returns empty).
+        let parentRowsByTMDB: [Int: Int] = Dictionary(
+            uniqueKeysWithValues: newRows.enumerated().compactMap { (idx, row) in
+                row.extraInfo == nil ? (row.tmdbId, idx) : nil
+            }
+        )
+        for extra in scope.pendingExtras {
+            guard let parentIdx = parentRowsByTMDB[extra.parentTMDBId] else { continue }
+            let parentRow = newRows[parentIdx]
+            let otherFolder = (parentRow.newFolderPath as NSString)
+                .appendingPathComponent("Other")
+            let newPath = (otherFolder as NSString)
+                .appendingPathComponent(extra.filename)
+            let extraStem = (extra.filename as NSString).deletingPathExtension
+            let oldFolderPath = (extra.markedPath as NSString)
+                .deletingLastPathComponent
+
+            // Gather sibling subtitles in the extra's containing
+            // folder. Filter by basename-stem so an Extras-Grym/
+            // folder shared between multiple bonuses doesn't drag
+            // unrelated subs onto this row.
+            var allocator = UniqueTargetAllocator()
+            var extraSubtitles: [SubtitleAsset] = []
+            let siblingSubs = Self.scanForSubtitles(
+                directory: oldFolderPath,
+                includeSubfolders: false
+            ).filter { sub in
+                let stem = (sub.filename as NSString).deletingPathExtension
+                return stem.hasPrefix(extraStem)
+            }
+            for sub in siblingSubs.sorted(by: { $0.filename < $1.filename }) {
+                let asset = Self.buildAsset(
+                    sourcePath: sub.path,
+                    sourceFilename: sub.filename,
+                    targetFolder: otherFolder,
+                    newStem: extraStem,
+                    originalContainer: nil,
+                    allocator: &allocator
+                )
+                extraSubtitles.append(asset)
+            }
+
+            let allSubsCanonical = extraSubtitles.allSatisfy { $0.path == $0.newPath }
+            if newPath == extra.markedPath && allSubsCanonical { continue }
+
+            let currentDisplay = Self.displayPath(extra.markedPath, rootStd: rootStd)
+            let proposedDisplay = Self.displayPath(newPath, rootStd: rootStd)
+            newRows.append(Row(
+                path: extra.markedPath,
+                currentFilename: extra.filename,
+                currentDisplay: currentDisplay,
+                proposedDisplay: proposedDisplay,
+                newPath: newPath,
+                newFolderPath: otherFolder,
+                oldFolderPath: oldFolderPath,
+                newFilename: extra.filename,
+                plan: .moveToOther,
+                tmdbId: extra.parentTMDBId,
+                customEdition: nil,
+                isRemux: false,
+                hasSpecialCharacters: FilenameSanitizer.hasSpecialCharacters(extra.filename),
+                subtitles: extraSubtitles,
+                extraInfo: Row.ExtraInfo(
+                    parentTMDBId: extra.parentTMDBId,
+                    relativeToParentDir: extra.relativeToParentDir,
+                    size: extra.size
+                )
+            ))
+        }
+
         // Duplicate-target detection: when two source files matched to
         // the same TMDB ID, both rows propose the identical destination
         // path. Without intervention the first row would succeed and the
@@ -438,8 +545,12 @@ final class RenameModel {
         //      visible.
         //   3. Rows whose source path contains filesystem-trouble
         //      characters the sanitizer is rewriting.
-        //   4. Rows that have subtitles attached.
-        //   5. Rows without subtitles.
+        //   4. Movie rows with subtitles attached.
+        //   5. Movie rows without subtitles.
+        //   6. Extras rows. Pinned to the bottom because Apply must
+        //      run them *after* their parent movie (the parent's
+        //      wrapper has to exist for the extra to land in its
+        //      `Other/` subfolder).
         // Within each bucket: alphabetical by current display path.
         newRows.sort { a, b in
             if a.duplicateConflict != b.duplicateConflict {
@@ -448,6 +559,11 @@ final class RenameModel {
             if a.duplicateConflict, a.newPath != b.newPath {
                 return a.newPath.localizedStandardCompare(b.newPath) == .orderedAscending
             }
+            // Movies before extras — apply-order requirement, see
+            // comment above.
+            let aIsExtra = a.extraInfo != nil
+            let bIsExtra = b.extraInfo != nil
+            if aIsExtra != bIsExtra { return !aIsExtra && bIsExtra }
             let aHasSuffix = a.subtitles.contains { $0.collisionSuffix }
             let bHasSuffix = b.subtitles.contains { $0.collisionSuffix }
             if aHasSuffix != bHasSuffix { return aHasSuffix && !bHasSuffix }
@@ -546,6 +662,13 @@ final class RenameModel {
                     if stagedFilePath != row.newPath {
                         try fm.moveItem(atPath: stagedFilePath, toPath: row.newPath)
                     }
+
+                case .moveToOther:
+                    // Extras get their own discovery — see the helper.
+                    // Returns the resolved source-side path of the
+                    // video so the subtitle pass below can find the
+                    // sibling subs in the same folder.
+                    try applyMoveToOther(rowIndex: idx, fm: fm)
                 }
 
                 try scope.updatePath(
@@ -565,8 +688,12 @@ final class RenameModel {
 
             // Subtitle pass. Folder canonicalization first, then individual
             // file renames. Each subtitle failure is captured per-asset so
-            // one bad rename doesn't poison the rest.
-            applySubtitles(rowIndex: idx, fm: fm)
+            // one bad rename doesn't poison the rest. Skip for
+            // `.moveToOther` because `applyMoveToOther` already
+            // handled the extras' subs inline using its discovery.
+            if row.plan != .moveToOther {
+                applySubtitles(rowIndex: idx, fm: fm)
+            }
         }
         progress = 1
 
@@ -599,6 +726,104 @@ final class RenameModel {
     /// `Subs/` folder exists when consolidation is targeting it, then
     /// renames each subtitle file. Each subtitle's status is captured
     /// individually so a single failure doesn't abort the rest.
+    /// Apply pass for one extras row: discover the file in either of
+    /// its possible homes (parent's canonical wrapper, or source root
+    /// for `.createFolderAndMove` parents), move it into the canonical
+    /// `Other/` folder, then move each sibling subtitle alongside.
+    /// Reports the outcome back to the scope so ImportSession can
+    /// write the `extras` table row at Move-to-Library time.
+    private func applyMoveToOther(rowIndex: Int, fm: FileManager) throws {
+        let row = rows[rowIndex]
+        guard let extraInfo = row.extraInfo else {
+            throw RenameError.sourceMissing(row.path)
+        }
+        // Parent's current path drives discovery — by the time this
+        // row applies, the parent movie row has already renamed
+        // (extras sort to the bottom of the apply queue).
+        guard let parent = scope.movies.first(where: {
+            $0.tmdbId == extraInfo.parentTMDBId
+        }) else {
+            throw RenameError.sourceMissing(
+                "Parent (tmdb-\(extraInfo.parentTMDBId)) not in scope"
+            )
+        }
+        let parentDir = (parent.path as NSString).deletingLastPathComponent
+        // Two homes. Primary: parent's *current* directory — covers
+        // .renameFolder cases where the extra travelled with the
+        // wrapper. Secondary: source root — covers
+        // .createFolderAndMove where the parent moved into a new
+        // wrapper but the extra stayed loose at the source root.
+        let primary = (parentDir as NSString)
+            .appendingPathComponent(extraInfo.relativeToParentDir)
+        let secondary = (scope.directoryPath as NSString)
+            .appendingPathComponent(extraInfo.relativeToParentDir)
+        let currentExtra: String
+        if fm.fileExists(atPath: primary) {
+            currentExtra = primary
+        } else if fm.fileExists(atPath: secondary) {
+            currentExtra = secondary
+        } else {
+            throw RenameError.sourceMissing(primary)
+        }
+
+        // Create `Other/` if missing. withIntermediateDirectories:
+        // true so we tolerate the parent wrapper having been newly
+        // created (createFolderAndMove case) without an extra
+        // existence-check.
+        if !fm.fileExists(atPath: row.newFolderPath) {
+            try fm.createDirectory(
+                atPath: row.newFolderPath,
+                withIntermediateDirectories: true
+            )
+        }
+
+        // Move the video. Idempotent: an already-canonical target is
+        // a no-op success.
+        if currentExtra != row.newPath {
+            if fm.fileExists(atPath: row.newPath) {
+                throw RenameError.targetExists(row.newPath)
+            }
+            try fm.moveItem(atPath: currentExtra, toPath: row.newPath)
+        }
+
+        // Subs: each lived as a sibling of the resolved
+        // `currentExtra`. Discover from that same folder by basename
+        // and move into the canonical Other/ alongside the video.
+        let videoSourceDir = (currentExtra as NSString).deletingLastPathComponent
+        for subIdx in row.subtitles.indices {
+            let sub = row.subtitles[subIdx]
+            let subBasename = (sub.path as NSString).lastPathComponent
+            let currentSub = (videoSourceDir as NSString)
+                .appendingPathComponent(subBasename)
+            do {
+                guard fm.fileExists(atPath: currentSub) else {
+                    throw RenameError.sourceMissing(currentSub)
+                }
+                if currentSub != sub.newPath {
+                    if fm.fileExists(atPath: sub.newPath) {
+                        throw RenameError.targetExists(sub.newPath)
+                    }
+                    try fm.moveItem(atPath: currentSub, toPath: sub.newPath)
+                }
+                rows[rowIndex].subtitles[subIdx].status = .succeeded
+            } catch {
+                rows[rowIndex].subtitles[subIdx].status = .failed
+                rows[rowIndex].subtitles[subIdx].failureReason = error.localizedDescription
+            }
+        }
+
+        // Hand the post-move source paths to the scope so
+        // ImportSession can finalize the `extras` table row after
+        // the wrappers move to the library.
+        scope.recordExtraRelocation(ExtraRelocationOutcome(
+            sourceAfterMove: row.newPath,
+            parentSourcePath: parent.path,
+            parentTMDBId: extraInfo.parentTMDBId,
+            filename: row.newFilename,
+            size: extraInfo.size
+        ))
+    }
+
     private func applySubtitles(rowIndex: Int, fm: FileManager) {
         guard rows.indices.contains(rowIndex) else { return }
         let row = rows[rowIndex]
@@ -711,6 +936,12 @@ final class RenameModel {
         case .renameFolder:
             return (row.newFolderPath as NSString).appendingPathComponent(originalFilename)
         case .createFolderAndMove:
+            return subtitle.path
+        case .moveToOther:
+            // Unreachable — extras rows use `applyMoveToOther` for
+            // their entire subtitle pass and never hit
+            // `applySubtitles` (which is the only caller of this
+            // helper). The case exists to satisfy exhaustiveness.
             return subtitle.path
         }
     }

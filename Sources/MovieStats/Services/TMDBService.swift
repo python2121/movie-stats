@@ -322,17 +322,27 @@ enum TMDBService {
     /// (much more reliable than the fuzzy lookup, and sidesteps the
     /// diacritic quirk in TMDB's search backend).
     ///
-    /// Returns nil if the path doesn't carry the tag. The match is
-    /// case-insensitive on the `tmdb` prefix to forgive odd variants.
+    /// Returns nil if the file's *own basename* doesn't carry the tag.
+    /// The match is case-insensitive on the `tmdb` prefix to forgive
+    /// odd variants.
+    ///
+    /// Crucially, only the basename is inspected — not the full path.
+    /// A previously-renamed wrapper folder carries `{tmdb-N}` in its
+    /// own name, and any nested file under that wrapper (e.g. an
+    /// extra parked in `Other/`, a sidecar subtitle, a re-imported
+    /// release sitting alongside) would otherwise inherit the
+    /// wrapper's id by accident and silently match to the parent
+    /// movie's TMDB record.
     static func tmdbID(fromPath path: String) -> Int? {
+        let basename = (path as NSString).lastPathComponent
         let pattern = #"\{[tT][mM][dD][bB]-(\d+)\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(path.startIndex..., in: path)
-        guard let match = regex.firstMatch(in: path, range: range),
+        let range = NSRange(basename.startIndex..., in: basename)
+        guard let match = regex.firstMatch(in: basename, range: range),
               match.numberOfRanges >= 2,
-              let captured = Range(match.range(at: 1), in: path)
+              let captured = Range(match.range(at: 1), in: basename)
         else { return nil }
-        return Int(path[captured])
+        return Int(basename[captured])
     }
 
     /// Full list of search results, ordered as TMDB returns them (relevance /

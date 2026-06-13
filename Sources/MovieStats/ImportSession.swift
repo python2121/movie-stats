@@ -131,6 +131,16 @@ final class ImportSession: MovieScope {
         if let entry = tmdbMatches.removeValue(forKey: oldPath) {
             tmdbMatches[newPath] = entry
         }
+        // Re-key any Replace mark for the same reason — without this,
+        // `pendingReplacements` (which checks the row's *current*
+        // session.movies path against `replaceMarkedPaths`) silently
+        // returns empty after Rename runs, the library copy survives
+        // into Move-to-Library, and the move loop then fails with
+        // "destination already exists" because the canonical wrapper
+        // is still occupied.
+        if replaceMarkedPaths.remove(oldPath) != nil {
+            replaceMarkedPaths.insert(newPath)
+        }
     }
 
     // MARK: - Step 0: pick + scan
@@ -144,6 +154,7 @@ final class ImportSession: MovieScope {
         tmdbMatches.removeAll()
         replaceMarkedPaths.removeAll()
         extrasMarks.removeAll()
+        recordedExtraRelocations.removeAll()
         currentStep = .pickDirectory
         lastError = nil
         await rescan()
@@ -162,6 +173,7 @@ final class ImportSession: MovieScope {
         tmdbMatches.removeAll()
         replaceMarkedPaths.removeAll()
         extrasMarks.removeAll()
+        recordedExtraRelocations.removeAll()
         lastError = nil
         busyMessage = ""
         currentStep = .pickDirectory
@@ -303,24 +315,16 @@ final class ImportSession: MovieScope {
         return duplicateConflicts.filter { marks.contains($0.imported.path) }
     }
 
-    /// Deletes the library copies named by `pendingReplacements` — the
-    /// video, its sidecar subtitles, and its wrapper folder when the
-    /// folder belongs to that movie alone. Permanent deletes, per the
-    /// app's no-Trash design.
-    func replaceExistingCopies() async {
-        isBusy = true
-        busyMessage = "Removing existing copies…"
-        defer {
-            isBusy = false
-            busyMessage = ""
-        }
-        await performReplacements()
-    }
-
-    /// The actual deletion work, factored out of `replaceExistingCopies`
-    /// so `moveToLibrary` can call it inline without fighting over the
-    /// `isBusy` flag. Delegates the file/db work to `AppModel.deleteLibraryCopies`,
-    /// which is shared with the standalone matcher's Replace flow.
+    /// Performs the queued replacements — deletes each library copy in
+    /// `pendingReplacements` (video + sidecars + wrapper when
+    /// exclusive). Permanent deletes per the app's no-Trash design.
+    ///
+    /// Internal-only and called from exactly one place:
+    /// `moveToLibrary`, after every other wizard step has succeeded.
+    /// Keeping this method `private` is load-bearing — wiring it to
+    /// a button or to the Match-step dialog would make destructive
+    /// work fire before the user reaches the final step, which is
+    /// the whole point of deferring deletion to Move to Library.
     private func performReplacements() async {
         let targets = pendingReplacements.flatMap { $0.existing }
         let failures = await appModel.deleteLibraryCopies(targets)
@@ -365,6 +369,12 @@ final class ImportSession: MovieScope {
     /// marking and move doesn't break attribution.
     private(set) var extrasMarks: [String: ExtraMark] = [:]
 
+    /// Outcomes accumulated by `RenameModel.apply` for each successful
+    /// extras relocation. Read at Move-to-Library time to write the
+    /// final library-path rows into the `extras` table after the
+    /// wrappers have moved.
+    private var recordedExtraRelocations: [ExtraRelocationOutcome] = []
+
     /// Marks / unmarks one file as an Extra. Passing `mark = nil`
     /// clears the entry. Called from the Duplicates view's per-row
     /// Extra checkbox.
@@ -374,6 +384,30 @@ final class ImportSession: MovieScope {
         } else {
             extrasMarks.removeValue(forKey: path)
         }
+    }
+
+    // MARK: - MovieScope extras conformance
+
+    /// One request per marked Extra, surfaced to the RenameModel so
+    /// it can fold extras into its plan as first-class rows
+    /// alongside the matched movies.
+    var pendingExtras: [ExtraRenameRequest] {
+        extrasMarks.map { (key, mark) in
+            ExtraRenameRequest(
+                markedPath: key,
+                filename: mark.filename,
+                size: mark.size,
+                parentTMDBId: mark.parentTMDBId,
+                relativeToParentDir: mark.relativeToParentDir
+            )
+        }
+    }
+
+    /// Accumulate a successful extras relocation. Move-to-Library
+    /// reads `recordedExtraRelocations` after the rescan to insert
+    /// `extras` table rows under each file's final library path.
+    func recordExtraRelocation(_ outcome: ExtraRelocationOutcome) {
+        recordedExtraRelocations.append(outcome)
     }
 
     /// Identifies the parent movie for a candidate-extra path. Uses
@@ -464,12 +498,12 @@ final class ImportSession: MovieScope {
             busyMessage = "Moving to library…"
         }
 
-        // Relocate any files the user marked as Extras at the Multi-
-        // Videos step into each parent movie's `Other/` subfolder
-        // BEFORE the main move loop. The wrappers about to move into
-        // the library now contain `Other/<extra>` — they'll travel
-        // with the wrapper, no separate move needed.
-        let extrasRelocations = relocateMarkedExtras()
+        // Extras have already been relocated by the Rename step into
+        // each parent's `Other/` subfolder inside the source tree, so
+        // they ride along when the wrapper moves below. We just need
+        // the recorded outcomes for the post-rescan DB write further
+        // down.
+        let extrasRelocations = recordedExtraRelocations
 
         let fm = FileManager.default
         // Compute the in-scope top-level items: each tracked movie's first
@@ -579,6 +613,7 @@ final class ImportSession: MovieScope {
         movies = []
         tmdbMatches.removeAll()
         extrasMarks.removeAll()
+        recordedExtraRelocations.removeAll()
         sourceDirectory = ""
         currentStep = .done
         if movedCount > 0, lastError == nil {
@@ -586,149 +621,19 @@ final class ImportSession: MovieScope {
         }
     }
 
-    // MARK: - Extras relocation helpers
-
-    /// One successfully-relocated extra. We capture its new source-side
-    /// path (inside the about-to-move wrapper) plus the parent's
-    /// source-side path so a later `recordRelocatedExtras` pass can
-    /// translate both into library paths via prefix substitution.
-    private struct ExtrasRelocation {
-        let sourceAfterMove: String
-        let parentSourcePath: String
-        let parentTMDBId: Int
-        let filename: String
-        let size: Int64
-    }
-
-    /// Walks `extrasMarks`, finds each marked file in the source tree,
-    /// and moves it into its parent's `Other/` subfolder so it travels
-    /// with the wrapper when the main move loop runs. Failures (parent
-    /// missing, file not found, target collision, etc.) are appended
-    /// to `lastError`; successful relocations are returned for the
-    /// post-move DB-insert pass.
-    private func relocateMarkedExtras() -> [ExtrasRelocation] {
-        guard !extrasMarks.isEmpty else { return [] }
-        let fm = FileManager.default
-        let sourceRoot = (sourceDirectory as NSString).standardizingPath
-        // Quick parent lookup by TMDB id — multiple extras can share
-        // the same parent so we resolve each parent only once.
-        let parentByTMDB: [Int: MovieFile] = Dictionary(
-            uniqueKeysWithValues: movies.compactMap { movie in
-                movie.tmdbId.map { ($0, movie) }
-            }
-        )
-
-        var relocations: [ExtrasRelocation] = []
-        var failures: [String] = []
-
-        for (markedPath, mark) in extrasMarks {
-            guard let parent = parentByTMDB[mark.parentTMDBId] else {
-                failures.append("\(mark.filename): parent movie no longer in this import")
-                continue
-            }
-            let parentDir = (parent.path as NSString).deletingLastPathComponent
-            // Discovery order: parent's *current* directory first
-            // (covers renameFolder, where the extra travelled inside
-            // a renamed wrapper) then source root (covers
-            // createFolderAndMove, where the main moved into a new
-            // wrapper but the extra stayed where the user dropped
-            // it). `relativeToParentDir` carries any intermediate
-            // folders (e.g. `Extras-Grym/Doc.mkv`) so nested
-            // extras-folders resolve in either home.
-            let primary = (parentDir as NSString)
-                .appendingPathComponent(mark.relativeToParentDir)
-            let secondary = (sourceRoot as NSString)
-                .appendingPathComponent(mark.relativeToParentDir)
-            let currentExtra: String
-            if fm.fileExists(atPath: primary) {
-                currentExtra = primary
-            } else if fm.fileExists(atPath: secondary) {
-                currentExtra = secondary
-            } else {
-                failures.append("\(mark.filename): not found in source tree")
-                continue
-            }
-
-            let otherDir = (parentDir as NSString).appendingPathComponent("Other")
-            if !fm.fileExists(atPath: otherDir) {
-                do {
-                    try fm.createDirectory(
-                        atPath: otherDir,
-                        withIntermediateDirectories: true
-                    )
-                } catch {
-                    failures.append("\(mark.filename): couldn't create Other/ — \(error.localizedDescription)")
-                    continue
-                }
-            }
-            let target = (otherDir as NSString).appendingPathComponent(mark.filename)
-            // Idempotency: if the extra is already at the canonical
-            // target, treat the no-op as success.
-            if currentExtra == target {
-                relocations.append(ExtrasRelocation(
-                    sourceAfterMove: target,
-                    parentSourcePath: parent.path,
-                    parentTMDBId: mark.parentTMDBId,
-                    filename: mark.filename,
-                    size: mark.size
-                ))
-                patchMovieAfterRelocation(markedPath: markedPath, target: target)
-                continue
-            }
-            if fm.fileExists(atPath: target) {
-                failures.append("\(mark.filename): a file with that name already exists in Other/")
-                continue
-            }
-            do {
-                try fm.moveItem(atPath: currentExtra, toPath: target)
-            } catch {
-                failures.append("\(mark.filename): \(error.localizedDescription)")
-                continue
-            }
-            relocations.append(ExtrasRelocation(
-                sourceAfterMove: target,
-                parentSourcePath: parent.path,
-                parentTMDBId: mark.parentTMDBId,
-                filename: mark.filename,
-                size: mark.size
-            ))
-            // Patch session.movies so the move-to-library loop's
-            // `itemsToMove` set doesn't see a stale pre-relocation
-            // path. Without this, the loop produces a spurious
-            // "doesn't exist" failure for the extra's old first-
-            // path-component even though the data lands correctly
-            // inside the wrapper.
-            patchMovieAfterRelocation(markedPath: markedPath, target: target)
-        }
-
-        if !failures.isEmpty {
-            let prefix = lastError.map { $0 + "\n" } ?? ""
-            lastError = prefix + "Couldn't relocate some extras:\n"
-                + failures.joined(separator: "\n")
-        }
-        return relocations
-    }
-
-    /// Updates a relocated extra's in-memory `MovieFile` entry so
-    /// downstream consumers (especially the move-to-library
-    /// `itemsToMove` set) compute the right first-path-component
-    /// from the post-relocation path. Looks the entry up by the
-    /// marking-time path — that's still what session.movies holds
-    /// for unmatched files, since the rename engine only patches
-    /// matched rows.
-    private func patchMovieAfterRelocation(markedPath: String, target: String) {
-        guard let idx = movies.firstIndex(where: { $0.path == markedPath })
-        else { return }
-        movies[idx].path = target
-        movies[idx].filename = (target as NSString).lastPathComponent
-    }
+    // MARK: - Extras DB-record helper
 
     /// Persists each relocated extra to the `extras` table under its
     /// final library path. Library path = swap `sourcePrefix` for the
-    /// library destination prefix — the wrapper has already moved by
-    /// the time this runs.
+    /// library destination prefix — the wrappers have already moved
+    /// by the time this runs, carrying the `Other/<extra>` files
+    /// along.
+    ///
+    /// Inputs come from `recordedExtraRelocations`, accumulated as
+    /// the RenameModel processed extras rows at step 7. We don't
+    /// re-do filesystem work here.
     private func recordRelocatedExtras(
-        _ relocations: [ExtrasRelocation],
+        _ relocations: [ExtraRelocationOutcome],
         sourcePrefix: String,
         destination: String,
         store: MovieStore

@@ -95,6 +95,19 @@ final class AppModel {
             do {
                 if wrapperDeletable {
                     try fm.removeItem(atPath: parent)
+                    // The wrapper carried any `Subs/` folder + its
+                    // sidecar files with it on the way out. The DB
+                    // rows attributed to this movie need to follow —
+                    // the standalone matcher's Replace flow doesn't
+                    // trigger a full rescan afterwards (only a
+                    // reloadFromStore), so without this the
+                    // subtitle_files table would keep rows pointing
+                    // at gone paths until the next user-initiated
+                    // Rescan rebuilt the table.
+                    let subs = (try? store.subtitleFiles(forMoviePath: existing.path)) ?? []
+                    for sub in subs {
+                        try? store.deleteSubtitleFile(path: sub.path)
+                    }
                 } else {
                     try fm.removeItem(atPath: existing.path)
                     let subs = (try? store.subtitleFiles(forMoviePath: existing.path)) ?? []

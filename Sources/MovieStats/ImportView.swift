@@ -73,12 +73,14 @@ struct ImportView: View {
     /// the library copies that'll be deleted when Move-to-Library
     /// runs. Pre-filters via `pendingReplacements` so any stale marks
     /// the user left on rows whose TMDB candidate later changed don't
-    /// inflate the count.
+    /// inflate the count. The wording stresses *when* the deletes
+    /// fire (the final Move-to-Library step) — the dialog records
+    /// consent here but performs no destructive work.
     private func matchReplaceDialogTitle() -> String {
         let conflicts = session?.pendingReplacements ?? []
         let count = conflicts.reduce(0) { $0 + $1.existing.count }
         if count == 0 { return "Confirm" }
-        return "Permanently delete \(count) library cop\(count == 1 ? "y" : "ies")?"
+        return "Queue \(count) library cop\(count == 1 ? "y" : "ies") for deletion at Move to Library?"
     }
 
     /// Body text for the Match-step Replace confirmation dialog —
