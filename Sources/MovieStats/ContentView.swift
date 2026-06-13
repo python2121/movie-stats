@@ -243,17 +243,17 @@ struct ContentView: View {
                     searchControl
                 }
 
-                let matches = filteredMovies
-                if matches.isEmpty {
+                let rows = groupedRows
+                if rows.isEmpty {
                     Spacer()
                     Text(searchText.isEmpty ? "No movies match the current filters." : "No matches for \"\(searchText)\".")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
                     Spacer()
                 } else if viewMode == .grid {
-                    movieGrid(matches)
+                    movieGrid(rows)
                 } else {
-                    movieRows(matches)
+                    movieRows(rows)
                 }
             }
         }
@@ -261,75 +261,87 @@ struct ContentView: View {
         .quickLookPreview($quickLookURL)
     }
 
-    private func movieRows(_ matches: [(rank: Int, movie: MovieFile)]) -> some View {
+    private func movieRows(_ rows: [MovieRow]) -> some View {
         List {
-            ForEach(matches, id: \.movie.id) { entry in
+            ForEach(rows) { row in
                 HStack(spacing: 12) {
-                    Text("\(entry.rank)")
+                    Text("\(row.rank)")
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .frame(minWidth: 28, alignment: .trailing)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
-                            Text(entry.movie.displayTitle)
+                            Text(row.representative.displayTitle)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                            chips(for: entry.movie)
+                            chips(for: row)
                         }
-                        Text(entry.movie.path)
+                        Text(row.representative.path)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                     Spacer()
-                    if entry.movie.watchedAt != nil {
+                    if row.representative.watchedAt != nil {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                            .help(watchedTooltip(entry.movie))
+                            .help(watchedTooltip(row.representative))
                     }
-                    personalStars(for: entry.movie)
-                    Text(byteString(entry.movie.size))
+                    personalStars(for: row.representative)
+                    if row.fileCount > 1 {
+                        copyCountChip(row.fileCount)
+                    }
+                    Text(byteString(row.totalSize))
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
-                    imdbRatingChip(for: entry.movie)
+                    imdbRatingChip(for: row.representative)
                     Button {
-                        ExternalPlayer.play(path: entry.movie.path)
+                        ExternalPlayer.play(path: row.representative.path)
                     } label: {
                         Image(systemName: "play.circle")
                             .imageScale(.large)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
-                    .accessibilityLabel("Play \(entry.movie.displayTitle)")
+                    .accessibilityLabel("Play \(row.representative.displayTitle)")
                     .help("Play in \(ExternalPlayer.playerName)")
                 }
-                .help(entry.movie.path)
+                .help(rowTooltip(row))
                 .contentShape(Rectangle())
-                .onTapGesture { selectedMovie = entry.movie }
-                .contextMenu { movieContextMenu(entry.movie) }
+                .onTapGesture { selectedMovie = row.representative }
+                .contextMenu { movieContextMenu(row.representative) }
             }
         }
         .listStyle(.inset(alternatesRowBackgrounds: true))
     }
 
+    /// Hover tooltip for a library row. Single-file rows mirror the
+    /// pre-grouping behavior (just the path); multi-quality rows list
+    /// every file so the user can spot which variants are bundled
+    /// without opening the detail sheet.
+    private func rowTooltip(_ row: MovieRow) -> String {
+        guard row.fileCount > 1 else { return row.representative.path }
+        return row.allFiles.map(\.path).joined(separator: "\n")
+    }
+
     /// Plex-style poster wall. Same data, filters, and context menu as the
     /// list — just rendered as cached TMDB posters.
-    private func movieGrid(_ matches: [(rank: Int, movie: MovieFile)]) -> some View {
+    private func movieGrid(_ rows: [MovieRow]) -> some View {
         ScrollView {
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 14)],
                 spacing: 14
             ) {
-                ForEach(matches, id: \.movie.id) { entry in
-                    PosterCard(movie: entry.movie)
+                ForEach(rows) { row in
+                    PosterCard(movie: row.representative)
                         .contentShape(Rectangle())
-                        .onTapGesture { selectedMovie = entry.movie }
-                        .contextMenu { movieContextMenu(entry.movie) }
+                        .onTapGesture { selectedMovie = row.representative }
+                        .contextMenu { movieContextMenu(row.representative) }
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(entry.movie.displayTitle)
+                        .accessibilityLabel(row.representative.displayTitle)
                         .accessibilityAddTraits(.isButton)
-                        .accessibilityAction { selectedMovie = entry.movie }
+                        .accessibilityAction { selectedMovie = row.representative }
                 }
             }
             .padding(.vertical, 4)
@@ -476,21 +488,47 @@ struct ContentView: View {
         return "\(base)  (\(formatted) votes)"
     }
 
-    /// Type/HDR/DV/10-bit pills shown next to a movie's filename.
+    /// Edition / type / HDR / DV / 10-bit pills shown next to a movie's
+    /// filename. For multi-file rows the type / HDR pills are the
+    /// **union** across every file in the group so a "4K Remux + 1080p"
+    /// pair shows both classifier chips; DV and 10-bit fire if *any*
+    /// file in the group has them. The edition chip (when set)
+    /// renders first, leftmost, in a unique indigo so it reads as a
+    /// distinct "which cut is this?" annotation rather than a
+    /// quality attribute.
     @ViewBuilder
-    private func chips(for movie: MovieFile) -> some View {
-        if let type = movie.movieType, type != MovieType.unknown.rawValue {
+    private func chips(for row: MovieRow) -> some View {
+        if let edition = row.customEdition, !edition.isEmpty {
+            Chip(text: edition, color: .indigo)
+        }
+        ForEach(row.movieTypes, id: \.self) { type in
             Chip(text: type, color: .blue)
         }
-        if movie.hasDolbyVision {
+        if row.anyDolbyVision {
             Chip(text: "Dolby Vision", color: .purple)
         }
-        if let hdr = movie.hdrFormat {
+        ForEach(row.hdrFormats, id: \.self) { hdr in
             Chip(text: hdr, color: .orange)
         }
-        if movie.is10Bit {
+        if row.any10Bit {
             Chip(text: "10-bit", color: .teal)
         }
+    }
+
+    /// Small gray-on-outlined pill showing how many on-disk files this
+    /// row represents. Same shape as `imdbRatingChip` (capsule, text-
+    /// only, no icon) but in neutral gray so it doesn't compete with
+    /// the rating's yellow. Rendered only when count > 1 — a solo file
+    /// just shows the size with no chip to its left.
+    private func copyCountChip(_ count: Int) -> some View {
+        Text("\(count)")
+            .font(.caption.monospacedDigit().weight(.semibold))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Color.gray.opacity(0.18), in: Capsule())
+            .fixedSize()
+            .help("\(count) on-disk files for this entry — multiple quality / version copies.")
     }
 
     // MARK: - Pie chart slices
@@ -627,6 +665,43 @@ struct ContentView: View {
         }
 
         return final.enumerated().map { (rank: $0.offset + 1, movie: $0.element) }
+    }
+
+    /// Groups `filteredMovies` into rows by `(tmdbId, customEdition)`
+    /// slot so multiple-quality copies of the same edition collapse
+    /// into a single library row. Each unmatched movie remains its
+    /// own row. The largest file in each group is the "representative"
+    /// — its title, path, rating, and poster drive the row, while the
+    /// chip cluster shows the union of quality attributes across every
+    /// file and the size column shows the sum.
+    private var groupedRows: [MovieRow] {
+        let movies = filteredMovies.map(\.movie)
+        var groups: [String: [MovieFile]] = [:]
+        var order: [String] = []
+        for movie in movies {
+            let key: String
+            if let id = movie.tmdbId {
+                let edition = (movie.customEdition ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                key = "tmdb:\(id)|\(edition)"
+            } else {
+                // Unmatched files can't be canonically grouped — give
+                // each its own bucket keyed by path so iteration stays
+                // stable across renders.
+                key = "unmatched:\(movie.path)"
+            }
+            if groups[key] == nil {
+                groups[key] = []
+                order.append(key)
+            }
+            groups[key]!.append(movie)
+        }
+        return order.enumerated().map { idx, key in
+            let files = groups[key]!
+            let rep = files.max(by: { $0.size < $1.size }) ?? files[0]
+            return MovieRow(rank: idx + 1, representative: rep, allFiles: files)
+        }
     }
 
     /// Sort order selector — small dropdown showing the current choice.
@@ -1798,6 +1873,47 @@ private struct Chip: View {
             .foregroundStyle(color)
             .fixedSize()
     }
+}
+
+/// One library-table row, possibly representing several on-disk files
+/// (different qualities of the same TMDB id + edition). The
+/// representative is the largest file in the group and drives most of
+/// the row's appearance (title, path, rating, click target); the
+/// aggregated accessors below merge attributes across every file so
+/// the user sees the full quality picture without duplicate rows.
+struct MovieRow: Identifiable {
+    let rank: Int
+    let representative: MovieFile
+    let allFiles: [MovieFile]
+
+    var id: String { representative.id }
+    var fileCount: Int { allFiles.count }
+    /// Sum of every file's size in the group, for the size column.
+    /// Multi-quality entries report total disk usage rather than just
+    /// the representative's footprint.
+    var totalSize: Int64 { allFiles.reduce(Int64(0)) { $0 + $1.size } }
+    /// Custom edition (e.g. "Director's Cut") if set. Identical across
+    /// every file in the group because edition is part of the
+    /// grouping key.
+    var customEdition: String? { representative.customEdition }
+
+    /// All distinct classifier buckets present in the group, ordered
+    /// as in `MovieType.allCases` so the row's chip cluster reads
+    /// best-quality-first regardless of which file was the
+    /// representative. "Unknown" is excluded — that bucket means
+    /// "haven't probed yet" and isn't a meaningful chip.
+    var movieTypes: [String] {
+        let present = Set(allFiles.compactMap(\.movieType))
+            .filter { $0 != MovieType.unknown.rawValue }
+        return MovieType.allCases.map(\.rawValue).filter { present.contains($0) }
+    }
+    var anyDolbyVision: Bool { allFiles.contains(where: { $0.hasDolbyVision }) }
+    /// Unique HDR formats present across the group, sorted so chip
+    /// order doesn't reshuffle from one render to the next.
+    var hdrFormats: [String] {
+        Array(Set(allFiles.compactMap(\.hdrFormat))).sorted()
+    }
+    var any10Bit: Bool { allFiles.contains(where: { $0.is10Bit }) }
 }
 
 /// Compact stat tile used in the narrow left column. Icon + small caption +
