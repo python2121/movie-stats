@@ -292,6 +292,9 @@ struct ContentView: View {
                     if row.qualityVariantCount > 1 {
                         copyCountChip(row.qualityVariantCount)
                     }
+                    if !row.extras.isEmpty {
+                        extrasAvailableChip(row.extras.count)
+                    }
                     Text(byteString(row.bestQualityTotalSize))
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -640,6 +643,22 @@ struct ContentView: View {
             .background(Color.gray.opacity(0.18), in: Capsule())
             .fixedSize()
             .help("\(count) on-disk files for this entry — multiple quality / version copies.")
+    }
+
+    /// Sibling of `copyCountChip` — same capsule shape and neutral
+    /// gray tint, with the literal text "extras" instead of a count.
+    /// Surfaces the presence of bonus content next to the quality
+    /// count so the user knows a Play menu / detail-sheet visit will
+    /// have extras to choose from.
+    private func extrasAvailableChip(_ count: Int) -> some View {
+        Text("extras")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Color.gray.opacity(0.18), in: Capsule())
+            .fixedSize()
+            .help("\(count) bonus video\(count == 1 ? "" : "s") attached to this movie — pick one from the Play menu or open the detail sheet's Extras section.")
     }
 
     // MARK: - Pie chart slices
