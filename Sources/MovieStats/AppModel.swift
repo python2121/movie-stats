@@ -56,6 +56,63 @@ final class AppModel {
             movies = updated
         }
     }
+
+    /// Permanently deletes the given library copies — for each one, the
+    /// video file, its sidecar subtitles, and the wrapping folder when
+    /// the folder belongs to that movie alone — then reloads the
+    /// in-memory snapshot so observers see the post-deletion library
+    /// immediately. Returns a list of per-file failure messages for
+    /// items that couldn't be removed (caller decides how to surface
+    /// them).
+    ///
+    /// Shared by:
+    ///   - `ImportSession.performReplacements` — when the user checked
+    ///     Replace at the Match step of the import wizard.
+    ///   - `MatcherView`'s standalone-Confirm dialog — when the user
+    ///     checked Replace while matching unmatched library files.
+    ///
+    /// Permanent deletes, per the app's no-Trash design. Caller is
+    /// responsible for prompting + confirmation.
+    func deleteLibraryCopies(_ targets: [MovieFile]) async -> [String] {
+        guard let store, hasDirectory else { return [] }
+        let fm = FileManager.default
+        let libraryRoot = URL(fileURLWithPath: directoryPath).standardizedFileURL.path
+        var failures: [String] = []
+
+        for existing in targets {
+            let parent = URL(fileURLWithPath: existing.path).standardizedFileURL
+                .deletingLastPathComponent().path
+            // Wrapper-folder delete only when the folder is *inside*
+            // the library root, isn't the library root itself, and no
+            // other library movie shares it. Multi-quality wrappers
+            // hold two videos under the same canonical name; deleting
+            // the wrapper there would nuke the sibling too.
+            let wrapperDeletable = parent != libraryRoot
+                && parent.hasPrefix(libraryRoot + "/")
+                && !movies.contains {
+                    $0.path != existing.path && $0.path.hasPrefix(parent + "/")
+                }
+            do {
+                if wrapperDeletable {
+                    try fm.removeItem(atPath: parent)
+                } else {
+                    try fm.removeItem(atPath: existing.path)
+                    let subs = (try? store.subtitleFiles(forMoviePath: existing.path)) ?? []
+                    for sub in subs {
+                        try? fm.removeItem(atPath: sub.path)
+                        try? store.deleteSubtitleFile(path: sub.path)
+                    }
+                }
+                try store.deleteMovie(path: existing.path)
+            } catch {
+                failures.append("\(existing.filename): \(error.localizedDescription)")
+            }
+        }
+
+        reloadFromStore()
+        return failures
+    }
+
     private static let directoryKey = "selectedDirectoryPath"
     private static let recentsKey = "recentDirectoryPaths"
 

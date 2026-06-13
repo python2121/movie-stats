@@ -299,44 +299,11 @@ final class ImportSession: MovieScope {
 
     /// The actual deletion work, factored out of `replaceExistingCopies`
     /// so `moveToLibrary` can call it inline without fighting over the
-    /// `isBusy` flag.
+    /// `isBusy` flag. Delegates the file/db work to `AppModel.deleteLibraryCopies`,
+    /// which is shared with the standalone matcher's Replace flow.
     private func performReplacements() async {
-        guard let store = appModel.store, appModel.hasDirectory else { return }
-        let fm = FileManager.default
-        let libraryRoot = URL(fileURLWithPath: appModel.directoryPath).standardizedFileURL.path
-        var failures: [String] = []
-
-        for conflict in pendingReplacements {
-            for existing in conflict.existing {
-                let parent = URL(fileURLWithPath: existing.path).standardizedFileURL
-                    .deletingLastPathComponent().path
-                // Delete the whole wrapper folder (video + Subs/ + sidecars)
-                // only when it's inside the library, isn't the library root
-                // itself, and no other library movie lives in it.
-                let wrapperDeletable = parent != libraryRoot
-                    && parent.hasPrefix(libraryRoot + "/")
-                    && !appModel.movies.contains {
-                        $0.path != existing.path && $0.path.hasPrefix(parent + "/")
-                    }
-                do {
-                    if wrapperDeletable {
-                        try fm.removeItem(atPath: parent)
-                    } else {
-                        try fm.removeItem(atPath: existing.path)
-                        let subs = (try? store.subtitleFiles(forMoviePath: existing.path)) ?? []
-                        for sub in subs {
-                            try? fm.removeItem(atPath: sub.path)
-                            try? store.deleteSubtitleFile(path: sub.path)
-                        }
-                    }
-                    try store.deleteMovie(path: existing.path)
-                } catch {
-                    failures.append("\(existing.filename): \(error.localizedDescription)")
-                }
-            }
-        }
-
-        appModel.reloadFromStore()
+        let targets = pendingReplacements.flatMap { $0.existing }
+        let failures = await appModel.deleteLibraryCopies(targets)
         if !failures.isEmpty {
             lastError = "Couldn't remove some existing copies:\n"
                 + failures.joined(separator: "\n")

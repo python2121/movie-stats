@@ -1043,8 +1043,17 @@ struct ContentView: View {
 /// bottom. Triggered by clicking a row in the main movie list; dismisses on
 /// click-outside, Escape, or Done.
 private struct MovieDetailSheet: View {
-    let movie: MovieFile
+    /// The file the list/poster click handed us. Drives the initial
+    /// active selection and the unique key for the sheet's task work;
+    /// the user can flip to a sibling file via the multi-file
+    /// switcher below the title, which sets `selectedFileID`.
+    private let seedMovie: MovieFile
     let onClose: () -> Void
+
+    init(movie: MovieFile, onClose: @escaping () -> Void) {
+        self.seedMovie = movie
+        self.onClose = onClose
+    }
 
     enum TMDBState {
         case idle
@@ -1061,6 +1070,41 @@ private struct MovieDetailSheet: View {
     @State private var personalStars = 0
     @State private var fetchingTrailer = false
     @State private var trailerError: String?
+    /// The currently-shown file in the sheet's per-file sections.
+    /// `nil` falls back to `seedMovie`. Updated by the file switcher
+    /// when this movie's group has multiple on-disk copies.
+    @State private var selectedFileID: String?
+
+    /// Every on-disk file that belongs to the same library row as
+    /// `seedMovie` — same TMDB id, same custom edition. Sorted
+    /// largest-first so the switcher reads "best quality → fallback"
+    /// regardless of which file the user clicked into.
+    /// Unmatched seeds return just themselves (no siblings to group
+    /// with).
+    private var groupFiles: [MovieFile] {
+        guard let tmdbId = seedMovie.tmdbId else { return [seedMovie] }
+        let editionSlot: (String?) -> String = {
+            ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let seedEdition = editionSlot(seedMovie.customEdition)
+        let siblings = appModel.movies.filter {
+            $0.tmdbId == tmdbId && editionSlot($0.customEdition) == seedEdition
+        }
+        return siblings.isEmpty ? [seedMovie] : siblings.sorted { $0.size > $1.size }
+    }
+
+    /// The file every per-file detail (grid, audio/subtitle tracks,
+    /// external subs) is rendered against. Driven by the switcher's
+    /// `selectedFileID`, with `seedMovie` as the fallback so the rest
+    /// of the body keeps using `movie.X` unchanged.
+    private var movie: MovieFile {
+        if let id = selectedFileID,
+           let match = groupFiles.first(where: { $0.id == id })
+        {
+            return match
+        }
+        return seedMovie
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1084,6 +1128,11 @@ private struct MovieDetailSheet: View {
                     .textSelection(.enabled)
             }
             .padding(.bottom, 14)
+
+            if groupFiles.count > 1 {
+                fileSwitcher(files: groupFiles)
+                    .padding(.bottom, 14)
+            }
 
             Divider()
 
@@ -1236,6 +1285,110 @@ private struct MovieDetailSheet: View {
             }
         }
         .help("Your rating — click the same star again to clear")
+    }
+
+    // MARK: - Multi-file switcher
+
+    /// Stacked card list shown only when a row owns more than one
+    /// on-disk file (multi-quality copies of the same TMDB id +
+    /// edition). Each card surfaces filename + a concise chip
+    /// summary; clicking flips the rest of the sheet to that file's
+    /// data.
+    @ViewBuilder
+    private func fileSwitcher(files: [MovieFile]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Files (\(files.count))")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            VStack(spacing: 6) {
+                ForEach(files) { file in
+                    fileSwitcherCard(file: file, isActive: file.id == movie.id)
+                }
+            }
+        }
+    }
+
+    /// One row in the multi-file switcher. The active row gets an
+    /// accent background and a filled radio mark; inactive rows stay
+    /// quaternary. Whole card is the hit target.
+    @ViewBuilder
+    private func fileSwitcherCard(file: MovieFile, isActive: Bool) -> some View {
+        Button {
+            selectedFileID = file.id
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
+                    .font(.callout)
+                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(file.filename)
+                        .font(.callout.weight(isActive ? .semibold : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    fileSwitcherSummary(file: file)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isActive
+                          ? Color.accentColor.opacity(0.12)
+                          : Color.secondary.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(isActive
+                                  ? Color.accentColor.opacity(0.45)
+                                  : Color.clear,
+                                  lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(file.path)
+    }
+
+    /// Inline chip + bullet summary used inside each switcher card —
+    /// the same chip palette as the main library list (`Chip`) plus
+    /// resolution / codec / size as light bullet text. Designed to
+    /// fit on one line for typical libraries; truncates at the right
+    /// edge otherwise.
+    @ViewBuilder
+    private func fileSwitcherSummary(file: MovieFile) -> some View {
+        let resolution: String? = {
+            if let w = file.width, let h = file.height, w > 0, h > 0 {
+                return "\(w)×\(h)"
+            }
+            return nil
+        }()
+        let codec = file.videoCodec?.uppercased()
+        let size = ByteCountFormatter.string(
+            fromByteCount: file.size, countStyle: .file
+        )
+        HStack(spacing: 6) {
+            if let type = file.movieType, type != MovieType.unknown.rawValue {
+                Chip(text: type, color: .secondary)
+            }
+            if file.hasDolbyVision { Chip(text: "DV", color: .blue) }
+            if let hdr = file.hdrFormat { Chip(text: hdr, color: .orange) }
+            if file.is10Bit { Chip(text: "10-bit", color: .purple) }
+            bulletText(
+                [resolution, codec, size].compactMap { $0 }
+            )
+        }
+    }
+
+    /// Joins non-empty fragments with " • " separators and renders
+    /// them as one secondary caption line — used by the switcher
+    /// summary to keep resolution / codec / size visually grouped.
+    @ViewBuilder
+    private func bulletText(_ fragments: [String]) -> some View {
+        Text(fragments.joined(separator: " • "))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
     }
 
     // MARK: - Track tables

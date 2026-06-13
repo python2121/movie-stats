@@ -39,6 +39,15 @@ struct MatcherView: View {
 
     @State private var matcher: MatcherModel?
     @State private var editingRow: MatcherModel.Row?
+    /// Per-row Replace marks for the **standalone** library matcher
+    /// (when this view isn't embedded in the import wizard). Empty in
+    /// import mode — there the marks live on the ImportSession and
+    /// reach us via `replaceConfig`.
+    @State private var standaloneReplaceMarks: Set<String> = []
+    /// Drives the standalone Replace confirmation sheet that fires
+    /// when the user clicks Confirm with at least one row marked
+    /// Replace.
+    @State private var showStandaloneReplaceConfirm = false
 
     init(
         scopedScope: (any MovieScope)? = nil,
@@ -48,6 +57,59 @@ struct MatcherView: View {
         self.scopedScope = scopedScope
         self.embedded = embedded
         self.replaceConfig = replaceConfig
+    }
+
+    /// True when this is the standalone "Match Library to TMDB" window —
+    /// not embedded in another scope, no externally-supplied replace
+    /// config. The view auto-builds its own Replace plumbing in this
+    /// mode.
+    private var isStandaloneMatcher: Bool {
+        scopedScope == nil && replaceConfig == nil
+    }
+
+    /// The replace plumbing actually used by the table — caller-supplied
+    /// in import mode, auto-built from `appModel` + local marks in
+    /// standalone mode. Read this everywhere instead of the raw
+    /// `replaceConfig`.
+    private var effectiveReplaceConfig: MatcherReplaceConfig? {
+        if let replaceConfig { return replaceConfig }
+        if isStandaloneMatcher { return makeStandaloneReplaceConfig() }
+        return nil
+    }
+
+    /// Builds the standalone Replace config: isReplaceable checks the
+    /// live library for a same-`(tmdbId, customEdition)` entry other
+    /// than the row's own file; mark state reads/writes
+    /// `standaloneReplaceMarks` via the @State binding.
+    private func makeStandaloneReplaceConfig() -> MatcherReplaceConfig {
+        let marksBinding = $standaloneReplaceMarks
+        let appModelRef = appModel
+        return MatcherReplaceConfig(
+            isReplaceable: { row in
+                guard let candidate = row.candidate else { return false }
+                let rowEdition = Self.editionSlot(row.customEdition)
+                return appModelRef.movies.contains { existing in
+                    existing.path != row.path
+                        && existing.tmdbId == candidate.id
+                        && Self.editionSlot(existing.customEdition) == rowEdition
+                }
+            },
+            isMarked: { row in marksBinding.wrappedValue.contains(row.path) },
+            setMarked: { row, value in
+                if value {
+                    marksBinding.wrappedValue.insert(row.path)
+                } else {
+                    marksBinding.wrappedValue.remove(row.path)
+                }
+            }
+        )
+    }
+
+    /// Normalizes a custom edition into the slot key — trim + lower,
+    /// matching `ImportSession.slotEdition` so duplicate detection
+    /// stays consistent across the two flows.
+    private static func editionSlot(_ edition: String?) -> String {
+        (edition ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     /// Width of the right-hand include checkbox column. Same value used by
@@ -197,14 +259,16 @@ struct MatcherView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: Self.includeColumnWidth, alignment: .center)
                         .padding(.vertical, 6)
-                    if replaceConfig != nil {
+                    if effectiveReplaceConfig != nil {
                         Divider()
                         Text("Replace")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .frame(width: Self.replaceColumnWidth, alignment: .center)
                             .padding(.vertical, 6)
-                            .help("Check to mark the matching library copy for permanent deletion when this import is moved to the library. Only available for rows whose selected TMDB candidate (and custom edition) already exists in the library.")
+                            .help(isStandaloneMatcher
+                                  ? "Check to permanently delete a library copy that already matches this TMDB id + edition. The Confirm button will prompt before deletion. Only available for rows whose selected TMDB candidate already exists elsewhere in the library."
+                                  : "Check to mark the matching library copy for permanent deletion when this import is moved to the library. Only available for rows whose selected TMDB candidate (and custom edition) already exists in the library.")
                     }
                 }
                 .background(.quaternary.opacity(0.3))
@@ -261,9 +325,9 @@ struct MatcherView: View {
                   ? "Pick a TMDB match first to include this row"
                   : "Include this row when you click Confirm")
 
-            if let replaceConfig {
+            if let cfg = effectiveReplaceConfig {
                 Divider()
-                replaceCell(for: row, config: replaceConfig)
+                replaceCell(for: row, config: cfg)
             }
         }
         .background(isCurrent ? Color.accentColor.opacity(0.12) : .clear)
@@ -284,7 +348,9 @@ struct MatcherView: View {
                 ))
                 .toggleStyle(.checkbox)
                 .labelsHidden()
-                .help("Delete the matching library copy (video + sidecars + wrapper folder) when this import moves over. The Match step's Next button will surface a confirmation dialog before you can advance.")
+                .help(isStandaloneMatcher
+                      ? "Permanently delete the matching library copy (video + sidecars + wrapper folder) when you click Confirm. A confirmation dialog will list the targets before the deletion happens."
+                      : "Delete the matching library copy (video + sidecars + wrapper folder) when this import moves over. The Match step's Next button will surface a confirmation dialog before you can advance.")
             } else {
                 Text("—")
                     .foregroundStyle(.tertiary)
@@ -352,7 +418,7 @@ struct MatcherView: View {
             }
 
             Button(confirmLabel(model: model)) {
-                Task { await model.confirm() }
+                handleConfirmTap(model: model)
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
@@ -362,9 +428,101 @@ struct MatcherView: View {
                     || model.isConfirming
                     || model.rows.allSatisfy { !$0.included }
             )
+            .confirmationDialog(
+                standaloneReplaceDialogTitle(),
+                isPresented: $showStandaloneReplaceConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete & Confirm Matches", role: .destructive) {
+                    Task { await runStandaloneReplaceThenConfirm(model: model) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(standaloneReplaceDialogMessage())
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    /// Confirm-button handler. In standalone mode with at least one row
+    /// marked Replace, surface a confirmation sheet before doing
+    /// anything destructive; otherwise pass straight through to
+    /// `matcher.confirm()` (the existing happy path).
+    private func handleConfirmTap(model: MatcherModel) {
+        // Auto-prune stale marks: rows the user may have un-picked a
+        // candidate for since marking, or rows whose underlying file
+        // moved out from under us. Keeps the dialog accurate.
+        let validRowPaths = Set(model.rows.map { $0.path })
+        standaloneReplaceMarks.formIntersection(validRowPaths)
+
+        if isStandaloneMatcher && !standaloneReplacementTargets().isEmpty {
+            showStandaloneReplaceConfirm = true
+        } else {
+            Task { await model.confirm() }
+        }
+    }
+
+    /// Library files marked for deletion by the standalone Replace
+    /// flow. For each row checked Replace, finds every library entry
+    /// with the same `(tmdbId, customEdition)` slot (excluding the
+    /// row's own file), deduped by path.
+    private func standaloneReplacementTargets() -> [MovieFile] {
+        guard let matcher else { return [] }
+        var targets: [MovieFile] = []
+        var seen = Set<String>()
+        for row in matcher.rows where standaloneReplaceMarks.contains(row.path) {
+            guard let candidate = row.candidate else { continue }
+            let rowEdition = Self.editionSlot(row.customEdition)
+            for libraryMovie in appModel.movies {
+                guard libraryMovie.path != row.path,
+                      libraryMovie.tmdbId == candidate.id,
+                      Self.editionSlot(libraryMovie.customEdition) == rowEdition,
+                      !seen.contains(libraryMovie.path)
+                else { continue }
+                seen.insert(libraryMovie.path)
+                targets.append(libraryMovie)
+            }
+        }
+        return targets
+    }
+
+    /// Standalone-replace dialog title — count of files about to be
+    /// permanently deleted.
+    private func standaloneReplaceDialogTitle() -> String {
+        let count = standaloneReplacementTargets().count
+        return "Permanently delete \(count) existing library file\(count == 1 ? "" : "s")?"
+    }
+
+    /// Standalone-replace dialog body — itemizes the first 8 targets
+    /// by filename, summarizes the rest, and reminds the user it's
+    /// irreversible.
+    private func standaloneReplaceDialogMessage() -> String {
+        let targets = standaloneReplacementTargets()
+        let shown = targets.prefix(8).map { "• \($0.filename)" }.joined(separator: "\n")
+        let suffix = targets.count > 8 ? "\n…and \(targets.count - 8) more" : ""
+        return """
+        These library files will be permanently deleted before the new matches are written:
+
+        \(shown)\(suffix)
+
+        This action cannot be undone.
+        """
+    }
+
+    /// Standalone-replace OK action. Runs the deletions through the
+    /// shared `AppModel.deleteLibraryCopies`, surfaces any failures on
+    /// the matcher's error line, clears the marks, then commits the
+    /// matches via `matcher.confirm()`.
+    private func runStandaloneReplaceThenConfirm(model: MatcherModel) async {
+        let targets = standaloneReplacementTargets()
+        let failures = await appModel.deleteLibraryCopies(targets)
+        if !failures.isEmpty {
+            model.lastError = "Couldn't remove some existing copies:\n"
+                + failures.joined(separator: "\n")
+        }
+        standaloneReplaceMarks.removeAll()
+        await model.confirm()
     }
 
     /// Confirm button text — appends the included count so the user can see
