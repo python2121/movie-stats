@@ -18,6 +18,12 @@ final class AppModel {
     private static let probeConcurrency = 6
 
     private(set) var movies: [MovieFile] = []
+    /// In-memory snapshot of every row in the `extras` table. Keyed
+    /// by TMDB id in the views (each library row pulls its extras
+    /// out by parent's `tmdbId`), so a single load powers both the
+    /// detail-sheet's Extras section and the library row's Play
+    /// menu without an N-rows × per-row DB hit on every render.
+    private(set) var extras: [ExtraFile] = []
     private(set) var isScanning = false
     var lastError: String?
 
@@ -54,6 +60,9 @@ final class AppModel {
         guard let store else { return }
         if let updated = try? store.allMovies() {
             movies = updated
+        }
+        if let updated = try? store.allExtras() {
+            extras = updated
         }
     }
 
@@ -144,6 +153,7 @@ final class AppModel {
             let store = try MovieStore()
             // Load the previous scan straight from disk — no rescan needed.
             movies = try store.allMovies()
+            extras = (try? store.allExtras()) ?? []
             openedStore = store
         } catch {
             openedStore = nil
@@ -265,6 +275,7 @@ final class AppModel {
             try store.replaceAll(scanned)
             try store.replaceAllSubtitleFiles(subtitles)
             movies = try store.allMovies()
+            extras = (try? store.allExtras()) ?? []
         } catch {
             lastError = "\(error)"
             return
@@ -286,6 +297,7 @@ final class AppModel {
         do {
             try store.clearAllMetadata()
             movies = try store.allMovies()
+            extras = (try? store.allExtras()) ?? []
         } catch {
             lastError = "\(error)"
             return

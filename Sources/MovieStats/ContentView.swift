@@ -342,14 +342,24 @@ struct ContentView: View {
     @ViewBuilder
     private func movieContextMenu(_ row: MovieRow) -> some View {
         let movie = row.representative
-        // Multi-quality row: Play becomes a submenu of qualities so
-        // the user can pick which copy to launch without opening the
-        // detail sheet. Single-file row: regular play button.
-        if row.fileCount > 1 {
+        // Multi-quality / multi-part / has-extras: Play becomes a
+        // submenu so the user can pick a specific copy or extra
+        // without opening the detail sheet. Plain row: regular Play
+        // button.
+        if row.fileCount > 1 || !row.extras.isEmpty {
             Menu("Play in \(ExternalPlayer.playerName)") {
                 ForEach(row.allFiles) { file in
                     Button(playMenuLabel(for: file)) {
                         ExternalPlayer.play(path: file.path)
+                    }
+                }
+                if !row.extras.isEmpty {
+                    Section("Extras") {
+                        ForEach(row.extras) { extra in
+                            Button(extrasPlayMenuLabel(for: extra)) {
+                                ExternalPlayer.play(path: extra.path)
+                            }
+                        }
                     }
                 }
             }
@@ -383,11 +393,24 @@ struct ContentView: View {
     /// items so the user picks which copy to launch.
     @ViewBuilder
     private func playControl(for row: MovieRow) -> some View {
-        if row.fileCount > 1 {
+        // Menu appears when there's more than one playable thing —
+        // either multiple parts / qualities, OR there's just one
+        // main file but the movie has attributed extras, OR both.
+        let needsMenu = row.fileCount > 1 || !row.extras.isEmpty
+        if needsMenu {
             Menu {
                 ForEach(row.allFiles) { file in
                     Button(playMenuLabel(for: file)) {
                         ExternalPlayer.play(path: file.path)
+                    }
+                }
+                if !row.extras.isEmpty {
+                    Section("Extras") {
+                        ForEach(row.extras) { extra in
+                            Button(extrasPlayMenuLabel(for: extra)) {
+                                ExternalPlayer.play(path: extra.path)
+                            }
+                        }
                     }
                 }
             } label: {
@@ -398,8 +421,8 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .accessibilityLabel("Play \(row.representative.displayTitle) — choose a quality")
-            .help("Choose which copy to play in \(ExternalPlayer.playerName)")
+            .accessibilityLabel("Play \(row.representative.displayTitle) — choose a copy")
+            .help("Choose a part, quality, or extra to play in \(ExternalPlayer.playerName)")
         } else {
             Button {
                 ExternalPlayer.play(path: row.representative.path)
@@ -414,12 +437,32 @@ struct ContentView: View {
         }
     }
 
+    /// Per-extra label used inside the Play menu — strips the file
+    /// extension and middle-truncates long names so the menu rows
+    /// stay manageable. Just the cleaned stem; the menu's own
+    /// "Extras" section header carries the category context.
+    private func extrasPlayMenuLabel(for extra: ExtraFile) -> String {
+        let stem = (extra.filename as NSString).deletingPathExtension
+        return Self.truncatedMiddle(stem, limit: 48)
+    }
+
+    /// Middle-truncates a string to fit a character `limit`, replacing
+    /// the elided middle with an ellipsis. Returns the input
+    /// unchanged when it's already short enough.
+    private static func truncatedMiddle(_ s: String, limit: Int) -> String {
+        guard s.count > limit, limit > 1 else { return s }
+        let half = (limit - 1) / 2
+        let prefix = s.prefix(half)
+        let suffix = s.suffix(half)
+        return "\(prefix)…\(suffix)"
+    }
+
     /// Per-copy label used inside the Play menu of a multi-quality
-    /// or multi-part row. Composed as
-    /// `[Part N · ][type · ]<size>`, with parts shown first because
-    /// disc selection usually trumps quality selection when both
-    /// dimensions vary. Falls back to the filename when `movie_type`
-    /// isn't set yet (an unprobed row, basically).
+    /// or multi-part row. Composed as `[Part N · ][type]`, with
+    /// parts shown first because disc selection usually trumps
+    /// quality selection when both dimensions vary. Falls back to
+    /// the filename when `movie_type` isn't set yet (an unprobed
+    /// row, basically).
     private func playMenuLabel(for file: MovieFile) -> String {
         var pieces: [String] = []
         if let part = file.partNumber {
@@ -429,10 +472,9 @@ struct ContentView: View {
             pieces.append(type)
         } else if file.partNumber == nil {
             // Unprobed solo file — fall back to filename so the menu
-            // item isn't just a size with no context.
+            // item isn't blank when neither part nor type is known.
             pieces.append(file.filename)
         }
-        pieces.append(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
         return pieces.joined(separator: " · ")
     }
 
@@ -723,14 +765,34 @@ struct ContentView: View {
             groups[key]!.append(movie)
         }
 
-        // Build unranked rows; intra-row file order is parts
-        // ascending then qualities largest-first so the Play menu
-        // reads Part 1 → Part 2 → … with each part's best quality on
-        // top. Solo files fall through to size sort.
+        // Index extras by TMDB id so each row picks up its own
+        // attributed set in O(1) instead of scanning the global list
+        // for every row.
+        let extrasByTMDB: [Int: [ExtraFile]] = Dictionary(
+            grouping: model.extras.filter { $0.parentTMDBId != nil },
+            by: { $0.parentTMDBId! }
+        )
+
+        // Build unranked rows; intra-row file order is **quality-
+        // major** — best quality bucket first, parts ascending
+        // within a bucket, size descending as the tiebreak. So a 2-
+        // disc 4K + 2-disc 1080p library row reads
+        // `Part 1 (4K) → Part 2 (4K) → Part 1 (1080p) → Part 2 (1080p)`
+        // in the Play menu. MovieType.allCases is the canonical
+        // best→worst ordering (4K UHD Remux > 1080p Blu-ray Remux >
+        // 4K Encode > 1080p Encode > 720p Encode > SD).
+        let typeOrder: [String: Int] = Dictionary(
+            uniqueKeysWithValues: MovieType.allCases.enumerated().map {
+                ($1.rawValue, $0)
+            }
+        )
         let unranked: [MovieRow] = order.map { key in
             let files = groups[key]!
             let rep = files.max(by: { $0.size < $1.size }) ?? files[0]
             let sorted = files.sorted { a, b in
+                let ai = a.movieType.flatMap { typeOrder[$0] } ?? Int.max
+                let bi = b.movieType.flatMap { typeOrder[$0] } ?? Int.max
+                if ai != bi { return ai < bi }
                 switch (a.partNumber, b.partNumber) {
                 case let (lhs?, rhs?) where lhs != rhs: return lhs < rhs
                 case (nil, _?): return false
@@ -738,7 +800,16 @@ struct ContentView: View {
                 default: return a.size > b.size
                 }
             }
-            return MovieRow(rank: 0, representative: rep, allFiles: sorted)
+            let rowExtras = rep.tmdbId.flatMap { extrasByTMDB[$0] } ?? []
+            let sortedExtras = rowExtras.sorted {
+                $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
+            }
+            return MovieRow(
+                rank: 0,
+                representative: rep,
+                allFiles: sorted,
+                extras: sortedExtras
+            )
         }
 
         // Sort the rows. Non-size sorts use the representative file's
@@ -788,7 +859,8 @@ struct ContentView: View {
             MovieRow(
                 rank: idx + 1,
                 representative: row.representative,
-                allFiles: row.allFiles
+                allFiles: row.allFiles,
+                extras: row.extras
             )
         }
     }
@@ -1694,7 +1766,7 @@ private struct MovieDetailSheet: View {
                             .font(.callout.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .gridColumnAlignment(.trailing)
-                        Text(extra.filename)
+                        Text((extra.filename as NSString).deletingPathExtension)
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .help(extra.path)
@@ -1705,7 +1777,7 @@ private struct MovieDetailSheet: View {
                                 .imageScale(.medium)
                         }
                         .buttonStyle(.borderless)
-                        .accessibilityLabel("Play \(extra.filename)")
+                        .accessibilityLabel("Play \((extra.filename as NSString).deletingPathExtension)")
                         .help("Play in \(ExternalPlayer.playerName)")
                     }
                     .font(.callout)
@@ -2266,6 +2338,11 @@ struct MovieRow: Identifiable {
     let rank: Int
     let representative: MovieFile
     let allFiles: [MovieFile]
+    /// Bonus videos attributed to this movie's TMDB id (unioned
+    /// across editions — extras belong to the *movie*, not a cut).
+    /// Empty for unmatched rows or movies with no recorded extras.
+    /// Sorted by filename for stable ordering in the Play menu.
+    let extras: [ExtraFile]
 
     var id: String { representative.id }
     var fileCount: Int { allFiles.count }
