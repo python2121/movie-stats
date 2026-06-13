@@ -179,22 +179,25 @@ struct DuplicatesView: View {
         .help(file.path)
     }
 
-    /// Per-row "Mark as Extra" cell. Rendered only in import-wizard
-    /// mode (when `extrasConfig` is non-nil). Eligible rows (those
-    /// with a TMDB-matched larger sibling in the same bucket) show a
-    /// checkbox bound through the config; ineligible rows render a
-    /// dimmed dash with a tooltip explaining why.
+    /// Per-row "Mark as Extra" cell. Always rendered (when
+    /// `extrasConfig` is set) so the column never disappears — even
+    /// in single-video imports where no row is eligible to be marked.
+    /// Ineligible rows show the toggle disabled with a tooltip
+    /// explaining why; eligible rows show it as a working checkbox.
     @ViewBuilder
     private func extraCell(for file: ScannedFile, config: DuplicatesExtrasConfig) -> some View {
-        if config.isMarkable(file) {
-            Toggle("Extra", isOn: extrasBinding(for: file, config: config))
-                .toggleStyle(.checkbox)
-                .help("Move this file into the parent movie's `Other/` subfolder when the import completes, and record it in the library database. Mutually exclusive with the Delete checkbox.")
-        } else {
-            Text("—")
-                .foregroundStyle(.tertiary)
-                .help("Mark a TMDB-matched movie as the largest video in this bucket first, then smaller siblings can be flagged as Extras.")
-        }
+        let markable = config.isMarkable(file)
+        Toggle(
+            "Extra",
+            isOn: markable
+                ? extrasBinding(for: file, config: config)
+                : .constant(false)
+        )
+        .toggleStyle(.checkbox)
+        .disabled(!markable)
+        .help(markable
+              ? "Move this file into the parent movie's `Other/` subfolder when the import completes, and record it in the library database. Mutually exclusive with the Delete checkbox."
+              : "Marking this as an Extra needs a larger TMDB-matched sibling video in the same bucket — that sibling becomes the parent movie the extra is attached to.")
     }
 
     private var footer: some View {

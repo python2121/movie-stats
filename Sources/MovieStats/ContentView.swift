@@ -296,21 +296,12 @@ struct ContentView: View {
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
                     imdbRatingChip(for: row.representative)
-                    Button {
-                        ExternalPlayer.play(path: row.representative.path)
-                    } label: {
-                        Image(systemName: "play.circle")
-                            .imageScale(.large)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Play \(row.representative.displayTitle)")
-                    .help("Play in \(ExternalPlayer.playerName)")
+                    playControl(for: row)
                 }
                 .help(rowTooltip(row))
                 .contentShape(Rectangle())
                 .onTapGesture { selectedMovie = row.representative }
-                .contextMenu { movieContextMenu(row.representative) }
+                .contextMenu { movieContextMenu(row) }
             }
         }
         .listStyle(.inset(alternatesRowBackgrounds: true))
@@ -337,7 +328,7 @@ struct ContentView: View {
                     PosterCard(movie: row.representative)
                         .contentShape(Rectangle())
                         .onTapGesture { selectedMovie = row.representative }
-                        .contextMenu { movieContextMenu(row.representative) }
+                        .contextMenu { movieContextMenu(row) }
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel(row.representative.displayTitle)
                         .accessibilityAddTraits(.isButton)
@@ -349,9 +340,23 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func movieContextMenu(_ movie: MovieFile) -> some View {
-        Button("Play in \(ExternalPlayer.playerName)") {
-            ExternalPlayer.play(path: movie.path)
+    private func movieContextMenu(_ row: MovieRow) -> some View {
+        let movie = row.representative
+        // Multi-quality row: Play becomes a submenu of qualities so
+        // the user can pick which copy to launch without opening the
+        // detail sheet. Single-file row: regular play button.
+        if row.fileCount > 1 {
+            Menu("Play in \(ExternalPlayer.playerName)") {
+                ForEach(row.allFiles) { file in
+                    Button(playMenuLabel(for: file)) {
+                        ExternalPlayer.play(path: file.path)
+                    }
+                }
+            }
+        } else {
+            Button("Play in \(ExternalPlayer.playerName)") {
+                ExternalPlayer.play(path: movie.path)
+            }
         }
         Button(movie.watchedAt == nil ? "Mark as Watched" : "Mark as Unwatched") {
             model.setWatched(movie, watched: movie.watchedAt == nil)
@@ -369,6 +374,56 @@ struct ContentView: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(movie.path, forType: .string)
         }
+    }
+
+    /// Play affordance shown on every library list row. When the row
+    /// has a single on-disk copy this is just a button. When it has
+    /// multiple copies (different qualities or versions of the same
+    /// matched movie), it becomes a menu of "Play <type> (<size>)"
+    /// items so the user picks which copy to launch.
+    @ViewBuilder
+    private func playControl(for row: MovieRow) -> some View {
+        if row.fileCount > 1 {
+            Menu {
+                ForEach(row.allFiles) { file in
+                    Button(playMenuLabel(for: file)) {
+                        ExternalPlayer.play(path: file.path)
+                    }
+                }
+            } label: {
+                Image(systemName: "play.circle")
+                    .imageScale(.large)
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Play \(row.representative.displayTitle) — choose a quality")
+            .help("Choose which copy to play in \(ExternalPlayer.playerName)")
+        } else {
+            Button {
+                ExternalPlayer.play(path: row.representative.path)
+            } label: {
+                Image(systemName: "play.circle")
+                    .imageScale(.large)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Play \(row.representative.displayTitle)")
+            .help("Play in \(ExternalPlayer.playerName)")
+        }
+    }
+
+    /// Per-copy label used inside the Play menu of a multi-quality
+    /// row. Format: `<type> · <size>` (e.g. "4K Remux · 78 GB"),
+    /// falling back to the filename when `movie_type` isn't set yet
+    /// (an unprobed row, basically).
+    private func playMenuLabel(for file: MovieFile) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)
+        if let type = file.movieType, type != MovieType.unknown.rawValue {
+            return "\(type) · \(size)"
+        }
+        return "\(file.filename) · \(size)"
     }
 
     @ViewBuilder

@@ -142,9 +142,29 @@ final class ImportSession: MovieScope {
         sourceDirectory = path
         movies = []
         tmdbMatches.removeAll()
+        replaceMarkedPaths.removeAll()
+        extrasMarks.removeAll()
         currentStep = .pickDirectory
         lastError = nil
         await rescan()
+    }
+
+    /// Clears every piece of in-flight import state and returns the
+    /// wizard to its first step (Pick Source). Bound to the wizard's
+    /// Cancel Import button + Escape key — the user stays inside the
+    /// window and can start a fresh import without closing and
+    /// reopening it. No-op while an async operation is in flight so
+    /// we can't yank state out from under it.
+    func resetToStart() {
+        guard !isBusy else { return }
+        sourceDirectory = ""
+        movies = []
+        tmdbMatches.removeAll()
+        replaceMarkedPaths.removeAll()
+        extrasMarks.removeAll()
+        lastError = nil
+        busyMessage = ""
+        currentStep = .pickDirectory
     }
 
     /// Walks the source directory for video files, builds the in-memory

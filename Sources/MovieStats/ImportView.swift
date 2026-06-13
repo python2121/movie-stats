@@ -43,7 +43,13 @@ struct ImportView: View {
         .onAppear {
             if session == nil { session = ImportSession(appModel: appModel) }
         }
-        .onExitCommand { dismiss() }
+        .onExitCommand {
+            // Esc inside the wizard rewinds to step 1 rather than
+            // closing the window — keeps the user in the import
+            // surface so they can start a fresh import without
+            // reopening it. Title-bar close still dismisses.
+            session?.resetToStart()
+        }
         .confirmationDialog(
             matchReplaceDialogTitle(),
             isPresented: $showMatchReplaceConfirm,
@@ -93,12 +99,36 @@ struct ImportView: View {
     /// candidate or typing a new edition flips the checkbox state
     /// without the matcher needing to know about the session itself.
     private func makeReplaceConfig(session: ImportSession) -> MatcherReplaceConfig {
-        let duplicatePaths: Set<String> = Set(session.duplicateConflicts.map { $0.imported.path })
+        // Eligibility reads the row's *pending* candidate + edition,
+        // not the session's committed `movies[i].tmdbId`. The Replace
+        // checkbox needs to light up the instant the user picks a
+        // TMDB result in the search sheet — well before they click
+        // matcher-Confirm (the only thing that actually writes
+        // `tmdbId` back onto the in-memory movie). Using
+        // `duplicateConflicts` here would gate the column on Confirm,
+        // which is what the user just hit as a bug.
+        let appModelRef = appModel
         return MatcherReplaceConfig(
-            isReplaceable: { row in duplicatePaths.contains(row.path) },
+            isReplaceable: { row in
+                guard let candidate = row.candidate else { return false }
+                let rowSlot = editionSlot(row.customEdition)
+                return appModelRef.movies.contains { existing in
+                    existing.path != row.path
+                        && existing.tmdbId == candidate.id
+                        && editionSlot(existing.customEdition) == rowSlot
+                }
+            },
             isMarked: { row in session.replaceMarkedPaths.contains(row.path) },
             setMarked: { row, value in session.setReplace(value, forPath: row.path) }
         )
+    }
+
+    /// Normalizes a custom edition into the slot key the rest of the
+    /// app uses (trim + lower). Mirrors `ImportSession.slotEdition` /
+    /// `MatcherView.editionSlot` — kept local here to avoid making
+    /// either one public for the sake of one call site.
+    private func editionSlot(_ raw: String?) -> String {
+        (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     /// Builds the DuplicatesView's Extras-column plumbing from the
@@ -547,8 +577,10 @@ struct ImportView: View {
     @ViewBuilder
     private func footer(session: ImportSession) -> some View {
         HStack(spacing: 12) {
-            Button("Cancel Import") { dismiss() }
+            Button("Cancel Import") { session.resetToStart() }
                 .keyboardShortcut(.cancelAction)
+                .disabled(session.isBusy)
+                .help("Discard everything you've done so far and return to Step 1 (Pick Source). Close the window from the title bar to exit the wizard entirely.")
             Spacer()
             if session.currentStep != .pickDirectory, session.currentStep != .done {
                 Button {
