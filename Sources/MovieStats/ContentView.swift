@@ -396,48 +396,42 @@ struct ContentView: View {
     /// items so the user picks which copy to launch.
     @ViewBuilder
     private func playControl(for row: MovieRow) -> some View {
-        // Menu appears when there's more than one playable thing —
-        // either multiple parts / qualities, OR there's just one
-        // main file but the movie has attributed extras, OR both.
-        let needsMenu = row.fileCount > 1 || !row.extras.isEmpty
-        if needsMenu {
-            Menu {
-                ForEach(row.allFiles) { file in
-                    Button(playMenuLabel(for: file)) {
-                        ExternalPlayer.play(path: file.path)
-                    }
+        // Every row renders as the same `Menu` so the icon's chrome
+        // (hover state, padding, hit area) is identical no matter
+        // how many files / extras the row carries. SwiftUI's `Menu`
+        // and `Button` are different macOS control types, and even
+        // with matched `buttonStyle` / `menuStyle` modifiers their
+        // native chrome diverges — using one control type
+        // everywhere is the only way to make them visually uniform.
+        //
+        // Single-file rows still get a menu, just with one item. A
+        // click opens the menu, the user picks the only option.
+        // Multi-file rows get the full part / quality / extra list.
+        Menu {
+            ForEach(row.allFiles) { file in
+                Button(playMenuLabel(for: file)) {
+                    ExternalPlayer.play(path: file.path)
                 }
-                if !row.extras.isEmpty {
-                    Section("Extras") {
-                        ForEach(row.extras) { extra in
-                            Button(extrasPlayMenuLabel(for: extra)) {
-                                ExternalPlayer.play(path: extra.path)
-                            }
+            }
+            if !row.extras.isEmpty {
+                Section("Extras") {
+                    ForEach(row.extras) { extra in
+                        Button(extrasPlayMenuLabel(for: extra)) {
+                            ExternalPlayer.play(path: extra.path)
                         }
                     }
                 }
-            } label: {
-                Image(systemName: "play.circle")
-                    .imageScale(.large)
-                    .foregroundStyle(.secondary)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel("Play \(row.representative.displayTitle) — choose a copy")
-            .help("Choose a part, quality, or extra to play in \(ExternalPlayer.playerName)")
-        } else {
-            Button {
-                ExternalPlayer.play(path: row.representative.path)
-            } label: {
-                Image(systemName: "play.circle")
-                    .imageScale(.large)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Play \(row.representative.displayTitle)")
-            .help("Play in \(ExternalPlayer.playerName)")
+        } label: {
+            Image(systemName: "play.circle")
+                .imageScale(.large)
+                .foregroundStyle(.secondary)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("Play \(row.representative.displayTitle)")
+        .help("Play in \(ExternalPlayer.playerName)")
     }
 
     /// Per-extra label used inside the Play menu — strips the file
