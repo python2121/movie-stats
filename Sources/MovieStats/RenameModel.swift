@@ -258,15 +258,18 @@ final class RenameModel {
             let isTopLevel = parentStd == rootStd
             let siblings = siblingCounts[parent, default: 1]
 
+            // A folder shared by multiple matched movies (e.g. a ripped
+            // "Star Wars Trilogy" folder holding three films) can't be
+            // renamed in place — the wrapper belongs to several distinct
+            // titles. Split each video out into its own canonical wrapper
+            // at the scan root, the same disk operation as a loose
+            // top-level video. The now-empty husk is auto-pruned after
+            // Apply (see the splitHusks pass in `apply`).
             let plan: Row.Plan
             let containerDir: String
-            if isTopLevel {
+            if isTopLevel || siblings > 1 {
                 plan = .createFolderAndMove
                 containerDir = scanRoot
-            } else if siblings > 1 {
-                // Folder is shared with other movies — can't rename it
-                // safely. Skip for v1; flag in UI later if desired.
-                continue
             } else {
                 plan = .renameFolder
                 containerDir = (parent as NSString).deletingLastPathComponent
@@ -312,9 +315,10 @@ final class RenameModel {
             // Subtitle assets — collected differently depending on plan.
             // For `.renameFolder` the entire folder is moving, so every
             // subtitle inside it belongs to this video. For
-            // `.createFolderAndMove` we have to filter root-level subtitles
-            // by filename-stem prefix because the loose video shares the
-            // scan root with other unrelated files.
+            // `.createFolderAndMove` the video shares its directory (the
+            // scan root, or a multi-movie folder) with other unrelated
+            // files, so we filter that directory's subtitles by
+            // filename-stem prefix.
             let videoStem = (movie.filename as NSString).deletingPathExtension
             let newStem = (newFilename as NSString).deletingPathExtension
             let subtitles: [SubtitleAsset]
@@ -326,11 +330,18 @@ final class RenameModel {
                     newStem: newStem
                 )
             case .createFolderAndMove:
+                // Top-level loose video → sidecars live at the scan root
+                // (pre-indexed once). A video split out of a shared
+                // multi-movie folder → sidecars live in that folder,
+                // claimed by filename-stem prefix.
+                let candidates = isTopLevel
+                    ? rootSubtitleIndex
+                    : Self.scanForSubtitles(directory: parent, includeSubfolders: false)
                 subtitles = Self.subtitlesForLooseVideo(
                     videoStem: videoStem,
                     newFolder: newFolderPath,
                     newStem: newStem,
-                    candidates: rootSubtitleIndex
+                    candidates: candidates
                 )
             case .moveToOther:
                 // Unreachable — this branch is only entered for
@@ -641,6 +652,10 @@ final class RenameModel {
 
         let fm = FileManager.default
         let total = work.count
+        let scanRootStd = URL(fileURLWithPath: scope.directoryPath).standardizedFileURL.path
+        // Shared multi-movie folders we split a video out of — candidates
+        // for auto-prune once every video has moved into its own wrapper.
+        var splitHusks: Set<String> = []
 
         for (offset, entry) in work.enumerated() {
             let (idx, row) = entry
@@ -732,8 +747,30 @@ final class RenameModel {
             if row.plan != .moveToOther {
                 applySubtitles(rowIndex: idx, fm: fm)
             }
+
+            // Record the source folder of a successfully-split video so
+            // the husk can be pruned below. Loose top-level videos sit
+            // directly at the scan root (oldFolderPath == scanRoot) and
+            // must never qualify — we never delete the library root.
+            if row.plan == .createFolderAndMove, rows[idx].status == .succeeded {
+                let oldFolderStd = URL(fileURLWithPath: row.oldFolderPath)
+                    .standardizedFileURL.path
+                if oldFolderStd != scanRootStd {
+                    splitHusks.insert(row.oldFolderPath)
+                }
+            }
         }
         progress = 1
+
+        // Prune split husks: a shared multi-movie folder is left behind
+        // once every video has moved into its own wrapper. Delete it only
+        // when nothing but hidden files (.DS_Store) remains — a leftover
+        // video, orphan subtitle, or untouched subfolder keeps it alive.
+        // Permanent delete (no Trash on network volumes), consistent with
+        // the rest of the app.
+        for husk in splitHusks where Self.containsOnlyHiddenEntries(husk, fm: fm) {
+            try? fm.removeItem(atPath: husk)
+        }
 
         // Pull the rekeyed paths back into the AppModel so the main window
         // shows the new on-disk locations.
@@ -1251,6 +1288,16 @@ final class RenameModel {
             }
         }
         return out
+    }
+
+    /// True when `directory` exists and its shallow contents are all
+    /// hidden (dotfiles like `.DS_Store`) — i.e. nothing the user would
+    /// miss. Drives the auto-prune of an emptied multi-movie husk folder
+    /// after a split rename. A missing/unreadable directory returns false
+    /// (don't delete what we can't inspect).
+    private static func containsOnlyHiddenEntries(_ directory: String, fm: FileManager) -> Bool {
+        guard let entries = try? fm.contentsOfDirectory(atPath: directory) else { return false }
+        return entries.allSatisfy { $0.hasPrefix(".") }
     }
 
     /// Path relative to `rootStd` when nested inside it, otherwise the raw

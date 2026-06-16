@@ -16,6 +16,11 @@ let package = Package(
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
             ],
             path: "Sources/MovieStats"
-        )
+        ),
+        .testTarget(
+            name: "MovieStatsTests",
+            dependencies: ["MovieStats"],
+            path: "Tests/MovieStatsTests"
+        ),
     ]
 )

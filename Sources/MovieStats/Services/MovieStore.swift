@@ -30,8 +30,15 @@ final class MovieStore {
 
     /// Opens (creating if needed) the database in Application Support and
     /// ensures the schema exists.
-    init() throws {
-        let url = try Self.databaseURL()
+    convenience init() throws {
+        try self.init(url: Self.databaseURL())
+    }
+
+    /// Opens the database at an explicit URL. The app always uses the
+    /// Application Support location via `init()`; the explicit-URL form
+    /// exists so tests can point at a throwaway temp file instead of
+    /// clobbering the user's real library.
+    init(url: URL) throws {
         if sqlite3_open(url.path, &db) != SQLITE_OK {
             throw MovieStoreError.open(lastErrorMessage())
         }

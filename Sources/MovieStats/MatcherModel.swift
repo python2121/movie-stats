@@ -4,7 +4,9 @@ import Foundation
 /// near-identical titles (e.g. "Mr & Mrs Smith" vs "Mr. and Mrs. Smith")
 /// where TMDB and the filename agree on the film but punctuation drifts.
 /// Returns a normalized Levenshtein ratio in [0, 1].
-private enum TitleSimilarity {
+/// Module-internal (not `private`) so the test target can exercise the
+/// &/and folding and the 0.80 fuzzy threshold directly.
+enum TitleSimilarity {
     /// Strips punctuation, collapses whitespace, lowercases. Leaves the bytes
     /// the actual title carries — no aggressive stemming or stop-word removal.
     /// `&` is folded to `and` before stripping so "Mr. & Mrs. Smith" and
