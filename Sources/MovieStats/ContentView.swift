@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var selectedTypes: Set<String> = []  // empty = all
     @State private var matchFilter: MatchFilter = .all
     @State private var watchFilter: WatchFilter = .all
+    @State private var extrasFilter: ExtrasFilter = .all
     @State private var selectedGenres: Set<String> = []  // empty = all
     @State private var selectedDecades: Set<Int> = []    // empty = all
     @AppStorage("libraryViewMode") private var viewMode: ViewMode = .list
@@ -82,6 +83,16 @@ struct ContentView: View {
         case all = "All"
         case watched = "Watched"
         case unwatched = "Unwatched"
+        var id: String { rawValue }
+    }
+
+    /// Filters the main list by whether a movie has attributed bonus
+    /// videos in the `extras` table. Driven by `ExtraFile.parentTMDBId`,
+    /// so an unmatched movie (no `tmdbId`) can never have extras.
+    enum ExtrasFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case withExtras = "Has Extras"
+        case withoutExtras = "No Extras"
         var id: String { rawValue }
     }
 
@@ -722,6 +733,20 @@ struct ContentView: View {
         case .unwatched: result = result.filter { $0.watchedAt == nil }
         }
 
+        switch extrasFilter {
+        case .all: break
+        case .withExtras:
+            result = result.filter { movie in
+                guard let id = movie.tmdbId else { return false }
+                return tmdbIDsWithExtras.contains(id)
+            }
+        case .withoutExtras:
+            result = result.filter { movie in
+                guard let id = movie.tmdbId else { return true }
+                return !tmdbIDsWithExtras.contains(id)
+            }
+        }
+
         if !selectedGenres.isEmpty {
             result = result.filter { movie in
                 movie.genres.contains { selectedGenres.contains($0) }
@@ -946,6 +971,9 @@ struct ContentView: View {
             Picker("Watched", selection: $watchFilter) {
                 ForEach(WatchFilter.allCases) { Text($0.rawValue).tag($0) }
             }
+            Picker("Extras", selection: $extrasFilter) {
+                ForEach(ExtrasFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
             Divider()
             Button("Clear All Filters") {
                 selectedTypes.removeAll()
@@ -953,6 +981,7 @@ struct ContentView: View {
                 selectedDecades.removeAll()
                 matchFilter = .all
                 watchFilter = .all
+                extrasFilter = .all
             }
             .disabled(activeFilterCount == 0)
         } label: {
@@ -981,7 +1010,15 @@ struct ContentView: View {
         var count = selectedTypes.count + selectedGenres.count + selectedDecades.count
         if matchFilter != .all { count += 1 }
         if watchFilter != .all { count += 1 }
+        if extrasFilter != .all { count += 1 }
         return count
+    }
+
+    /// TMDB ids that have at least one attributed extra. Drives the
+    /// `ExtrasFilter`; mirrors the `parentTMDBId` keying used in
+    /// `displayRows`.
+    private var tmdbIDsWithExtras: Set<Int> {
+        Set(model.extras.compactMap(\.parentTMDBId))
     }
 
     private var allGenres: [String] {
