@@ -143,6 +143,31 @@ final class ImportSession: MovieScope {
         }
     }
 
+    // MARK: - Snapshot membership (Smart Import per-movie include toggle)
+
+    /// Drops a movie from the in-memory snapshot so it's invisible to the
+    /// matcher/rename plan *and* to `moveToLibrary` (which otherwise moves the
+    /// containing folder of every movie still in `movies`, matched or not).
+    /// Used by Smart Import's Ready-step "don't touch this one" checkbox.
+    /// Also clears its cached match + any Replace mark. Reversible via
+    /// `reinsertMovie` — no re-scan or re-match needed.
+    func dropMovie(path: String) {
+        movies.removeAll { $0.path == path }
+        tmdbMatches.removeValue(forKey: path)
+        replaceMarkedPaths.remove(path)
+    }
+
+    /// Re-inserts a movie previously removed by `dropMovie`, restoring its
+    /// cached TMDB match so toggling the checkbox back on doesn't lose the
+    /// match. No-op if it's already present.
+    func reinsertMovie(_ movie: MovieFile) {
+        guard !movies.contains(where: { $0.path == movie.path }) else { return }
+        movies.append(movie)
+        if let id = movie.tmdbId {
+            tmdbMatches[movie.path] = (id, movie.confirmedYear, movie.customEdition)
+        }
+    }
+
     // MARK: - Step 0: pick + scan
 
     /// Replaces the current source directory and scans it for video

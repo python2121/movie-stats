@@ -228,12 +228,27 @@ struct SmartImportView: View {
                 Text("Final review")
                     .font(.title3.weight(.semibold))
 
-                // TMDB matches
-                section(title: "Matched to TMDB (\(model.matchedMovies.count))") {
-                    ForEach(model.matchedMovies, id: \.path) { movie in
+                // TMDB matches — each with an include checkbox. Unchecking
+                // drops it from the plan (and its surrounding cleanup) live.
+                let includedCount = model.candidateMovies.filter { model.isIncluded($0) }.count
+                section(title: "Matched to TMDB (\(includedCount) of \(model.candidateMovies.count) selected)") {
+                    Text("Uncheck any movie you don't want to import — it'll be left untouched in the watch directory.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(model.candidateMovies, id: \.path) { movie in
+                        let included = model.isIncluded(movie)
                         HStack(spacing: 8) {
+                            Toggle("", isOn: Binding(
+                                get: { model.isIncluded(movie) },
+                                set: { on in Task { await model.setIncluded(movie, on) } }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(.checkbox)
                             Image(systemName: "popcorn").foregroundStyle(.secondary)
-                            Text(movie.displayTitle).fontWeight(.medium)
+                            Text(movie.displayTitle)
+                                .fontWeight(.medium)
+                                .strikethrough(!included)
+                                .foregroundStyle(included ? .primary : .secondary)
                             if let id = movie.tmdbId {
                                 Text("{tmdb-\(id)}")
                                     .font(.caption.monospaced())
@@ -293,16 +308,14 @@ struct SmartImportView: View {
                     }
                 }
 
-                // Deletions
-                let deletedVideos = model.groups
-                    .flatMap(\.files)
-                    .filter { model.videoDeleteSelection.contains($0.path) }
-                let deletionTotal = model.imageDeletions.count + model.textDeletions.count + deletedVideos.count
+                // Deletions — only those that will actually fire (within the
+                // folders of still-selected movies).
+                let deletionTotal = model.totalDeletionCount
                 if deletionTotal > 0 {
                     section(title: "Will be permanently deleted (\(deletionTotal))") {
-                        ForEach(model.imageDeletions) { deletionLine($0.path, size: $0.size) }
-                        ForEach(model.textDeletions) { deletionLine($0.path, size: $0.size) }
-                        ForEach(deletedVideos) { deletionLine($0.path, size: $0.size) }
+                        ForEach(model.effectiveImageDeletions) { deletionLine($0.path, size: $0.size) }
+                        ForEach(model.effectiveTextDeletions) { deletionLine($0.path, size: $0.size) }
+                        ForEach(model.effectiveVideoDeletions) { deletionLine($0.path, size: $0.size) }
                     }
                 }
 
@@ -468,7 +481,8 @@ struct SmartImportView: View {
                         .font(.body.weight(.semibold))
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!appModel.hasDirectory)
+                .disabled(!appModel.hasDirectory
+                          || !model.candidateMovies.contains { model.isIncluded($0) })
             default:
                 EmptyView()
             }

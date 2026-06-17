@@ -60,6 +60,17 @@ final class SmartImportModel {
     /// in the review pane.
     private(set) var matchedPaths: Set<String> = []
 
+    /// Stable, title-sorted snapshot of every movie matched at `prepare` time.
+    /// Drives the Ready-step per-movie include checkboxes — kept separate from
+    /// the live `session.movies` so an unchecked (dropped) movie still shows
+    /// in the list (just unchecked) instead of vanishing.
+    private(set) var candidateMovies: [MovieFile] = []
+
+    /// Movies the user unchecked on the Ready step — left entirely untouched
+    /// (no rename, no move, no surrounding cleanup). Toggling drops/reinserts
+    /// them from the session and rebuilds the plan in place.
+    private(set) var excludedPaths: Set<String> = []
+
     /// When true, matched movies that already exist in the library
     /// (`libraryDuplicates`) have their existing copy permanently deleted
     /// before the new one moves in — the import wizard's Replace flow (§6.7),
@@ -85,7 +96,7 @@ final class SmartImportModel {
     }
 
     var totalDeletionCount: Int {
-        imageDeletions.count + textDeletions.count + videoDeleteSelection.count
+        effectiveImageDeletions.count + effectiveTextDeletions.count + effectiveVideoDeletions.count
     }
 
     /// Rename rows that collide on the same destination path — two downloads
@@ -106,6 +117,46 @@ final class SmartImportModel {
     }
 
     var hasConflicts: Bool { !conflictingRows.isEmpty || !libraryDuplicates.isEmpty }
+
+    // MARK: - Per-movie include toggle (Ready step)
+
+    func isIncluded(_ movie: MovieFile) -> Bool { !excludedPaths.contains(movie.path) }
+
+    /// Toggles whether a matched movie is part of this import. Unchecking drops
+    /// it from the session (so it's left untouched — no rename, move, or
+    /// surrounding cleanup) and rebuilds the rename plan in place; rechecking
+    /// reinserts it. The deletion previews derive from the still-active
+    /// folders, so they follow automatically.
+    func setIncluded(_ movie: MovieFile, _ included: Bool) async {
+        if included {
+            excludedPaths.remove(movie.path)
+            session.reinsertMovie(movie)
+        } else {
+            excludedPaths.insert(movie.path)
+            session.dropMovie(path: movie.path)
+        }
+        matchedPaths = Set(session.movies.filter { $0.tmdbId != nil }.map(\.path))
+        await rename.reload()
+    }
+
+    /// Folders (one level beneath the watch dir) of the movies still included.
+    /// Deletions are scoped to these so an unchecked movie's folder is left
+    /// entirely alone.
+    private var activeTrackedDirs: Set<String> {
+        trackedTopLevelDirs(of: matchedPaths)
+    }
+
+    private func isWithinActiveDir(_ path: String) -> Bool {
+        activeTrackedDirs.contains { path.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }
+    }
+
+    /// The deletions that will actually fire — filtered to the folders of
+    /// still-included movies. Used by both the Ready preview and `execute`.
+    var effectiveImageDeletions: [ScannedFile] { imageDeletions.filter { isWithinActiveDir($0.path) } }
+    var effectiveTextDeletions: [ScannedFile] { textDeletions.filter { isWithinActiveDir($0.path) } }
+    var effectiveVideoDeletions: [ScannedFile] {
+        groups.flatMap(\.files).filter { videoDeleteSelection.contains($0.path) && isWithinActiveDir($0.path) }
+    }
 
     // MARK: - Prepare (no disk mutations except TMDB/poster cache)
 
@@ -142,6 +193,8 @@ final class SmartImportModel {
         await matcher.confirm()
 
         matchedPaths = Set(session.movies.filter { $0.tmdbId != nil }.map(\.path))
+        excludedPaths = []
+        candidateMovies = matchedMovies
         // Correct the toolbar button to what this fresh scan actually found.
         monitor.updatePendingCount(matchedPaths.count)
         guard !matchedPaths.isEmpty else { phase = .nothingToImport; return }
@@ -228,9 +281,11 @@ final class SmartImportModel {
 
         // 1–3. Permanent deletes: images, text, then marked videos (samples
         // + any the user checked). Per the app's no-Trash design (§6.8).
-        let deletePaths = imageDeletions.map(\.path)
-            + textDeletions.map(\.path)
-            + Array(videoDeleteSelection)
+        // Filtered to still-included movies' folders so an unchecked movie's
+        // surroundings are never touched.
+        let deletePaths = effectiveImageDeletions.map(\.path)
+            + effectiveTextDeletions.map(\.path)
+            + effectiveVideoDeletions.map(\.path)
         let deleteFailures = await Self.removeItems(deletePaths)
         failures.append(contentsOf: deleteFailures)
 
@@ -309,15 +364,18 @@ final class SmartImportModel {
         lines.append("- Generated: \(ISO8601DateFormatter().string(from: Date()))")
         lines.append("")
 
-        // TMDB matches
-        lines.append("## TMDB matches (\(matchedMovies.count))")
-        if matchedMovies.isEmpty {
+        // TMDB matches (from the stable candidate snapshot, so excluded ones
+        // still appear — annotated — rather than silently dropping out).
+        let includedCount = candidateMovies.filter { isIncluded($0) }.count
+        lines.append("## TMDB matches (\(includedCount) of \(candidateMovies.count) included)")
+        if candidateMovies.isEmpty {
             lines.append("_none_")
         } else {
-            for movie in matchedMovies {
+            for movie in candidateMovies {
                 let id = movie.tmdbId.map { "{tmdb-\($0)}" } ?? ""
                 let type = movie.movieType.map { " · \($0)" } ?? ""
-                lines.append("- \(movie.displayTitle) \(id)\(type) · \(size(movie.size))")
+                let mark = isIncluded(movie) ? "" : " · EXCLUDED (left untouched)"
+                lines.append("- \(movie.displayTitle) \(id)\(type) · \(size(movie.size))\(mark)")
                 lines.append("  - source: \(relative(movie.path))")
             }
         }
@@ -339,16 +397,15 @@ final class SmartImportModel {
         }
         lines.append("")
 
-        // Deletions
-        let deletedVideos = groups.flatMap(\.files).filter { videoDeleteSelection.contains($0.path) }
-        let deletionTotal = imageDeletions.count + textDeletions.count + deletedVideos.count
+        // Deletions (only those that will actually fire — included folders)
+        let deletionTotal = totalDeletionCount
         lines.append("## Files to delete (\(deletionTotal)) — permanent, no Trash")
         if deletionTotal == 0 {
             lines.append("_none_")
         } else {
-            for file in imageDeletions { lines.append("- [image] \(relative(file.path)) · \(size(file.size))") }
-            for file in textDeletions { lines.append("- [text]  \(relative(file.path)) · \(size(file.size))") }
-            for file in deletedVideos { lines.append("- [video] \(relative(file.path)) · \(size(file.size))") }
+            for file in effectiveImageDeletions { lines.append("- [image] \(relative(file.path)) · \(size(file.size))") }
+            for file in effectiveTextDeletions { lines.append("- [text]  \(relative(file.path)) · \(size(file.size))") }
+            for file in effectiveVideoDeletions { lines.append("- [video] \(relative(file.path)) · \(size(file.size))") }
         }
         lines.append("")
 

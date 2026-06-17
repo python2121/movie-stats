@@ -732,6 +732,18 @@ Key decisions (match the user's spec + the clarifying answers):
   marks the post-rename paths via `session.setReplace` so `moveToLibrary`
   runs its Replace flow (deletes the old copy, then moves). Both cases are
   flagged in a "Needs attention" section.
+- **Per-movie include checkbox (Ready step).** Each matched movie has a
+  checkbox; unchecking it leaves that movie entirely untouched. Mechanism:
+  `SmartImportModel.setIncluded` drops/reinserts the movie from
+  `ImportSession` (`dropMovie`/`reinsertMovie`) — dropping is load-bearing
+  because `moveToLibrary` moves the containing folder of *every* movie still
+  in `session.movies`, matched or not, so merely nil-ing `tmdbId` wouldn't
+  stop the move. Toggling rebuilds the rename plan in place
+  (`rename.reload`), and the deletion previews derive from the still-active
+  folders (`effective{Image,Text,Video}Deletions` filtered to
+  `activeTrackedDirs`), so an unchecked movie's images/text/samples are
+  spared too. `candidateMovies` is a stable snapshot so an unchecked movie
+  stays visible (unchecked) rather than vanishing.
 - **The Multiple-Videos review** doesn't reuse `DuplicatesView` (whose
   delete selection is private to its own model and unreadable at Ready
   time). It reuses the genuinely reusable bits — `DuplicatesModel.group`
