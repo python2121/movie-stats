@@ -5,6 +5,8 @@ import SwiftUI
 struct MovieStatsApp: App {
     @State private var model = AppModel()
     @State private var chatModel = ChatModel()
+    @State private var smartImport = SmartImportMonitor()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         // A single main window — the model is app-wide state, so a second
@@ -13,6 +15,17 @@ struct MovieStatsApp: App {
             ContentView()
                 .environment(model)
                 .environment(chatModel)
+                .environment(smartImport)
+                .task { smartImport.start() }
+                .onChange(of: scenePhase) { _, phase in
+                    // Re-scan the watch dir whenever the app comes to the
+                    // foreground so the blue button reflects files added while
+                    // the app was in the background — the hourly poll alone is
+                    // too coarse to notice a fresh download promptly.
+                    if phase == .active {
+                        Task { await smartImport.scanNow() }
+                    }
+                }
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1280, height: 820)
@@ -34,6 +47,7 @@ struct MovieStatsApp: App {
 
         Settings {
             SettingsView()
+                .environment(smartImport)
         }
 
         Window(CleanupCategory.images.title, id: CleanupCategory.images.id) {
@@ -75,6 +89,13 @@ struct MovieStatsApp: App {
         Window("Import", id: "import") {
             ImportView()
                 .environment(model)
+        }
+        .windowResizability(.contentMinSize)
+
+        Window("Smart Import", id: "smart-import") {
+            SmartImportView()
+                .environment(model)
+                .environment(smartImport)
         }
         .windowResizability(.contentMinSize)
 
@@ -161,6 +182,9 @@ private struct LibraryCommands: Commands {
 
             Button("Import…") { openWindow(id: "import") }
                 .keyboardShortcut("i")
+
+            Button("Smart Import…") { openWindow(id: "smart-import") }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
 
             Button("Match Library to TMDB…") { openWindow(id: "tmdb-matcher") }
                 .keyboardShortcut("m", modifiers: [.command, .shift])

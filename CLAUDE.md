@@ -32,6 +32,12 @@ original framing of "show stats about my movies":
 - **Import wizard** — walks a *separate* "/complete"-style staging directory
   through TMDB match → cleanup → rename → move into the library, without
   touching the live library DB until the user clicks Move to Library.
+- **Smart Import** — an automated import against a persistent *watch
+  directory*. A background scan (~hourly) confident-matches the watch dir
+  and turns the toolbar button blue when something's importable; the window
+  then runs match → image/text cleanup planning → extras defaults → rename
+  planning headlessly, leaving just a Multiple-Videos review + a Ready
+  preview. Reuses the manual-import machinery underneath. See §6.19.
 - **Ask Claude** chat panel — runs the local `claude` CLI to query the
   SQLite database in natural language.
 
@@ -121,6 +127,7 @@ Each tool window has its own `*Model.swift` + `*View.swift` pair:
 | Empty Folders                | `EmptyFoldersModel`    | `EmptyFoldersView`    |
 | IMDb Ratings                 | `IMDbModel`            | `IMDbView`            |
 | Import                       | `ImportSession`        | `ImportView`          |
+| Smart Import                 | `SmartImportModel`     | `SmartImportView`     |
 | Library Reports              | `ReportsModel`         | `ReportsView`         |
 | Collections                  | `CollectionsModel`     | `CollectionsView`     |
 | Insights                     | — (reads AppModel)     | `InsightsView`        |
@@ -653,6 +660,87 @@ Added June 2026, cribbing from Plex / Radarr / tinyMediaManager:
   Collections, Insights) get none. The default Help menu is removed
   (no help book ships).
 
+### 6.19 Smart Import (automated import against a watch directory)
+
+Added June 2026. Automates the §6.7 import wizard against a persistent
+**watch directory** (a `/complete`-style staging dir, separate from the
+library). Three pieces:
+
+- **`SmartImportScanner`** (`Services/SmartImportScanner.swift`) — pure
+  background detection. Walks the watch dir and returns the paths that
+  confidently auto-match TMDB, using the *same* rule as the interactive
+  matcher (`MatcherModel.Row.isConfidentMatch` — the exact `Title (Year)`
+  match or fuzzy ≥0.80 + same year, extracted to a shared static so the
+  two can't drift). One search call per video, search-endpoint year (no
+  per-row details fetch). No DB writes / deletes / renames.
+
+- **`SmartImportMonitor`** (`SmartImportMonitor.swift`) — app-level
+  `@Observable`, created once in `MovieStatsApp` and injected via
+  `.environment` into the main window, the Smart Import window, and
+  Settings. Owns `watchDirectory` (UserDefaults key
+  `smartImportWatchDirectory`) and `pendingMatchCount`. `start()` runs a
+  sleeping `Task` loop (not a `Timer` — avoids the `@Sendable` capture
+  headache under Swift 6) that scans on launch and every hour; the app also
+  re-scans on `scenePhase == .active` (foreground) so a download added
+  mid-session lights the button promptly instead of waiting up to an hour,
+  and the window's `prepare()` pushes its fresh count back via
+  `updatePendingCount`. `scanNow` coalesces concurrent calls so a
+  post-import refresh that collides with the poll isn't dropped.
+  `hasPending` (count > 0) drives the **blue toolbar button** in
+  `ContentView` (`.tint(.blue)`); gray otherwise.
+
+- **`SmartImportModel`** (`SmartImportModel.swift`) + **`SmartImportView`** —
+  the per-window orchestrator + 2-pane UI. The model *composes* an
+  `ImportSession` (the `MovieScope` + `moveToLibrary`), a `MatcherModel`,
+  and a `RenameModel` — `ImportSession` is untouched. `prepare()` runs
+  scan → confident match (`MatcherModel(autoCommitOnPick: true)` →
+  `runScan()` → `confirm()`) → computes the image/text deletion plan →
+  seeds extras / sample defaults; `execute()` runs all deletes → rename
+  → empty-folder prune → `moveToLibrary()`.
+
+Key decisions (match the user's spec + the clarifying answers):
+
+- **Confident matches only.** Rows that don't auto-include stay
+  `tmdbId == nil` and fall out of every downstream step — left untouched
+  in the watch dir. There's no manual-match fallback here (use the regular
+  Import window for stragglers).
+- **Deletes are deferred to the Ready confirm.** `prepare()` only computes
+  what *would* be deleted; nothing is removed until the user clicks Import
+  to Library. The Ready pane shows renames before→after, TMDB matches, and
+  struck-through deletions. (Permanent deletes, §6.8.)
+- **Cleanup is scoped to matched-movie folders.** Image/text/empty-folder
+  sweeps run only inside the one-level-deep folders that contain a matched
+  movie (`trackedTopLevelDirs`), never the whole watch dir — so unmatched
+  release folders are never touched. A matched *loose* file at the watch
+  root contributes no folder, so it gets no surrounding cleanup and no
+  extras review; `RenameModel.createFolderAndMove` wraps it and
+  `moveToLibrary` moves it — the "just move the single file" outcome falls
+  out of the existing plan shapes.
+- **Multiple matches.** Several distinct movies (separate folders, or even
+  several different films in one folder) are handled by the reused logic —
+  each gets its own TMDB id, wrapper, and move (multi-movie split, §6.4).
+  Two cases are *safe but skipped* (never overwritten / lost), and Smart
+  Import surfaces both in the Ready preview + Export Plan rather than
+  silently dropping them: (a) **two downloads of the same movie** — Smart
+  Import doesn't run ffprobe, so the `[qualityTag]` split (§6.4) can't tell
+  them apart; they collide on one target, `RenameModel` marks them
+  `duplicateConflict` + unchecks them, and the headless `apply()` (which
+  only applies `included` rows) skips them; (b) **a movie already in the
+  library** (`session.duplicateConflicts`) — `moveToLibrary` won't
+  overwrite, so the move is skipped *unless* the user ticks the Ready-step
+  **Replace existing library copies** checkbox (`replaceExisting`), which
+  marks the post-rename paths via `session.setReplace` so `moveToLibrary`
+  runs its Replace flow (deletes the old copy, then moves). Both cases are
+  flagged in a "Needs attention" section.
+- **The Multiple-Videos review** doesn't reuse `DuplicatesView` (whose
+  delete selection is private to its own model and unreadable at Ready
+  time). It reuses the genuinely reusable bits — `DuplicatesModel.group`
+  for bucketing and `session.extrasMarks` / `session.parentMovie` for
+  attribution — and renders a purpose-built list so the final selection is
+  readable. Defaults: each non-main video → **Extra**, except ones whose
+  path reads as a `sample` → **Delete**. Only subfolder buckets with a
+  matched main *and* something else to decide are shown.
+
 ---
 
 ## 7. Common code patterns
@@ -772,6 +860,7 @@ Sources/MovieStats/
     Thumbnailer.swift          ImageIO downsampling for cleanup previews
     TextPreview.swift          short text snippet for cleanup previews
     IMDbDatasetService.swift   download + decompress + parse ratings TSV
+    SmartImportScanner.swift   background watch-dir confident-match detection
     ClaudeCodeRunner.swift     spawns claude CLI, parses stream-json
     CSVExporter.swift          File → Export Library to CSV menu item
   CleanupCategory.swift        config object: extensions + preview kind
@@ -788,6 +877,9 @@ Sources/MovieStats/
   RenameView.swift
   ImportSession.swift          wizard state (conforms to MovieScope)
   ImportView.swift             import wizard window
+  SmartImportMonitor.swift     app-level watch-dir poll + blue-button state
+  SmartImportModel.swift       automated import orchestrator (§6.19)
+  SmartImportView.swift        smart import 2-pane window
   IMDbModel.swift              dataset-download workflow state
   IMDbView.swift
   ReportsModel.swift           library-health reports (subs/upgrades/dupes/…)

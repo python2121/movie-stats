@@ -117,16 +117,37 @@ final class MatcherModel {
         /// Drives green text and the initial auto-include state.
         var isExactMatch: Bool {
             guard let candidate else { return false }
-            if candidateDisplayTitle == displayTitle { return true }
+            return Self.isConfidentMatch(
+                parsedTitle: parsedTitle,
+                parsedYear: parsedYear,
+                fileDisplayTitle: displayTitle,
+                candidateTitle: candidate.title,
+                candidateYear: preferredYear ?? candidate.year
+            )
+        }
 
-            // Same-year + close-enough title fuzzy path. Catches punctuation
-            // drift like "Mr & Mrs" vs "Mr. and Mrs.", "WALL-E" vs "WALL·E",
-            // "Spider-Man: Homecoming" vs "Spider Man Homecoming", etc.
+        /// Shared confidence rule used both here (`isExactMatch`) and by the
+        /// background `SmartImportScanner`. A candidate is confident when the
+        /// "Title (Year)" strings agree exactly, or — as a fuzzy fallback for
+        /// punctuation drift ("Mr & Mrs" vs "Mr. and Mrs.", "WALL-E" vs
+        /// "WALL·E", "Spider-Man: Homecoming" vs "Spider Man Homecoming") —
+        /// the years agree and the titles are at least `fuzzyTitleThreshold`
+        /// similar. `candidateYear` is the caller's best year for the
+        /// candidate (e.g. `preferredYear ?? candidate.year`).
+        static func isConfidentMatch(
+            parsedTitle: String,
+            parsedYear: Int?,
+            fileDisplayTitle: String,
+            candidateTitle: String,
+            candidateYear: String?
+        ) -> Bool {
+            let candidateDisplay = candidateYear.map { "\(candidateTitle) (\($0))" } ?? candidateTitle
+            if candidateDisplay == fileDisplayTitle { return true }
             guard let parsedYear,
-                  let candYearStr = preferredYear ?? candidate.year,
+                  let candYearStr = candidateYear,
                   let candYear = Int(candYearStr),
                   parsedYear == candYear else { return false }
-            return TitleSimilarity.ratio(parsedTitle, candidate.title) >= Self.fuzzyTitleThreshold
+            return TitleSimilarity.ratio(parsedTitle, candidateTitle) >= fuzzyTitleThreshold
         }
 
         enum Status: Equatable {
@@ -233,6 +254,15 @@ final class MatcherModel {
     func startScan() {
         guard !isScanning, !isConfirming, !rows.isEmpty else { return }
         scanTask = Task { await scanAll() }
+    }
+
+    /// Awaitable variant of `startScan` for headless callers (the Smart
+    /// Import orchestrator) that need the scan to finish before moving on.
+    /// `startScan` is fire-and-forget; this returns only once every row has
+    /// been attempted.
+    func runScan() async {
+        guard !isScanning, !isConfirming, !rows.isEmpty else { return }
+        await scanAll()
     }
 
     func cancelScan() {

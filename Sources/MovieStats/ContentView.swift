@@ -6,6 +6,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(ChatModel.self) private var chatModel
+    @Environment(SmartImportMonitor.self) private var smartImport
     @Environment(\.openWindow) private var openWindow
 
     @State private var searchText = ""
@@ -101,7 +102,13 @@ struct ContentView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        // Establish a body-level dependency on the watch-dir match count.
+        // The toolbar item that turns blue reads this too, but toolbar
+        // content built in a sub-builder isn't always re-evaluated on an
+        // @Environment observable change — touching it here guarantees
+        // ContentView re-renders (and the toolbar with it) when it flips.
+        let _ = smartImport.pendingMatchCount
+        return HStack(spacing: 0) {
             mainColumn
 
             if chatOpen {
@@ -144,7 +151,11 @@ struct ContentView: View {
             let cap = maxPanelWidth
             if panelWidth > cap { panelWidth = cap }
         }
-        .toolbar(id: "main") { toolbarContent }
+        // Persistence id is versioned: bump it whenever a new default toolbar
+        // item is added so the saved customization doesn't hide it. A fresh id
+        // has no saved layout, so SwiftUI uses the default set (every item
+        // without `showsByDefault: false`). Resets prior customizations.
+        .toolbar(id: "main-v2") { toolbarContent }
         // Window-wide ⌘F — expands (or refocuses) the list filter field.
         .background(
             Button("") {
@@ -1113,6 +1124,29 @@ struct ContentView: View {
                 Label("Import", systemImage: "tray.and.arrow.down")
             }
             .help("Walk a /complete-style folder through TMDB matching, cleanup, rename, and move into the library")
+        }
+
+        ToolbarItem(id: "smart-import") {
+            Button {
+                openWindow(id: "smart-import")
+            } label: {
+                Label {
+                    Text("Smart Import")
+                } icon: {
+                    // Color the glyph directly — `.tint` doesn't reliably
+                    // recolor a borderless macOS toolbar icon. A filled
+                    // badge variant when active makes the change obvious
+                    // even at a glance.
+                    Image(systemName: smartImport.hasPending
+                          ? "wand.and.stars.inverse"
+                          : "wand.and.stars")
+                        .foregroundStyle(smartImport.hasPending ? Color.blue : Color.primary)
+                        .symbolVariant(smartImport.hasPending ? .fill : .none)
+                }
+            }
+            .help(smartImport.hasPending
+                  ? "\(smartImport.pendingMatchCount) download(s) in the watch directory are ready to import"
+                  : "Auto-match, clean, rename, and import downloads from your watch directory")
         }
     }
 
