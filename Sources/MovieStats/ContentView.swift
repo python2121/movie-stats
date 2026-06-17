@@ -1366,6 +1366,50 @@ private struct MovieDetailSheet: View {
         return seedMovie
     }
 
+    /// TMDB community score for the loaded detail, when available.
+    private var tmdbRating: Double? {
+        if case .loaded(let detail) = tmdbState { return detail.voteAverage }
+        return nil
+    }
+
+    /// Header ratings row that replaces the old filename line — shows TMDB
+    /// and/or IMDb scores when we have them, and collapses to nothing when we
+    /// don't (unmatched movie, no IMDb dataset entry, or TMDB not yet loaded).
+    @ViewBuilder
+    private var ratingsRow: some View {
+        let tmdb = tmdbRating
+        let imdb = movie.imdbRating
+        if tmdb != nil || imdb != nil {
+            HStack(spacing: 10) {
+                if let imdb {
+                    ratingChip(label: "IMDb", value: imdb, votes: movie.imdbVotes)
+                }
+                if let tmdb {
+                    ratingChip(label: "TMDB", value: tmdb, votes: nil)
+                }
+            }
+        }
+    }
+
+    private func ratingChip(label: String, value: Double, votes: Int?) -> some View {
+        var tip = String(format: "%@: %.1f / 10", label, value)
+        if let votes {
+            tip += " · \(votes.formatted()) votes"
+        }
+        return HStack(spacing: 4) {
+            Image(systemName: "star.fill")
+                .foregroundStyle(.yellow)
+                .font(.caption2)
+            Text("\(label) \(String(format: "%.1f", value))")
+                .font(.callout)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Color.secondary.opacity(0.12), in: Capsule())
+        .help(tip)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
@@ -1374,12 +1418,7 @@ private struct MovieDetailSheet: View {
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
-                Text(movie.filename)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
+                ratingsRow
                 Text(movie.path)
                     .font(.caption)
                     .foregroundStyle(.secondary)

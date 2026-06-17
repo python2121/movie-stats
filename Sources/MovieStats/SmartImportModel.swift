@@ -316,6 +316,18 @@ final class SmartImportModel {
             }
         }
 
+        // Drop every still-unmatched video from the session before the move.
+        // `moveToLibrary` moves the *first path component* of every movie in
+        // `session.movies` — matched or not — so an unmatched video like
+        // `TGCC V2.0/Home Videos/Jeremy Clarkson #3 …mkv` would otherwise drag
+        // its entire `TGCC V2.0` top-level folder into the library even though
+        // nothing in it matched. Smart Import only moves confirmed matches;
+        // any extras the user kept were already relocated *inside* a matched
+        // wrapper by `rename.apply` above, so they ride along regardless.
+        for path in session.movies.filter({ $0.tmdbId == nil }).map(\.path) {
+            session.dropMovie(path: path)
+        }
+
         // 6. Move matched wrappers into the library (rescan + match re-apply +
         // extras DB rows + watch-dir husk prune all handled by the session).
         session.autoPruneSource = true

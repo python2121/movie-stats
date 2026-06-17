@@ -128,7 +128,7 @@ final class ReportsModel {
                 size: movie.size
             )
         }
-        .sorted { $0.detail > $1.detail }
+        .sorted { ($0.size ?? 0) < ($1.size ?? 0) }
     }
 
     private func duplicateMatches(movies: [MovieFile]) -> [Row] {
