@@ -31,10 +31,16 @@ struct SmartImportView: View {
         }
         .frame(minWidth: Self.minWidth, minHeight: Self.minHeight)
         .onAppear {
+            // Re-scan every time the window opens so a download added since it
+            // was last closed shows up without a manual Rescan. The @State
+            // model survives close/reopen, so on reuse we re-prepare — guarding
+            // only against clobbering a prepare/import that's actually in flight.
             if model == nil {
                 let created = SmartImportModel(appModel: appModel, monitor: monitor)
                 model = created
                 Task { await created.prepare() }
+            } else if let model, model.phase != .preparing, model.phase != .importing {
+                Task { await model.prepare() }
             }
         }
         .onExitCommand { dismiss() }
