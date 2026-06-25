@@ -30,8 +30,10 @@ enum ClaudeCodeRunner {
 
     private static func resolveBinary() -> URL? {
         let fm = FileManager.default
+        let home = URL(fileURLWithPath: NSHomeDirectory())
         let candidates: [URL] = [
-            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/local/claude"),
+            home.appendingPathComponent(".claude/local/claude"),
+            home.appendingPathComponent(".local/bin/claude"),
             URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
             URL(fileURLWithPath: "/usr/local/bin/claude"),
         ]
