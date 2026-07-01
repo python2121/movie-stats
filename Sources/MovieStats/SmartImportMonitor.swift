@@ -28,6 +28,11 @@ final class SmartImportMonitor {
     /// Number of videos in the watch dir that confidently auto-match TMDB as
     /// of the last scan. Drives the blue toolbar highlight.
     private(set) var pendingMatchCount = 0
+    /// TMDB lookups that errored during the last background scan. Non-zero
+    /// means `pendingMatchCount` may be an undercount (network trouble, rate
+    /// limit) — surfaced in the toolbar so "no matches" isn't mistaken for
+    /// "nothing on TMDB".
+    private(set) var lastScanFailureCount = 0
     private(set) var lastScanAt: Date?
     private(set) var isScanning = false
     /// Set when `scanNow` is called while a scan is already running, so the
@@ -60,6 +65,9 @@ final class SmartImportMonitor {
     /// next background tick.
     func updatePendingCount(_ count: Int) {
         pendingMatchCount = count
+        // The window's full match pass is authoritative — clear any stale
+        // incomplete-scan flag from the background poll.
+        lastScanFailureCount = 0
         lastScanAt = Date()
     }
 
@@ -93,7 +101,9 @@ final class SmartImportMonitor {
         isScanning = true
         repeat {
             rescanRequested = false
-            pendingMatchCount = await SmartImportScanner.confidentMatches(in: watchDirectory).count
+            let outcome = await SmartImportScanner.confidentMatches(in: watchDirectory)
+            pendingMatchCount = outcome.matchedPaths.count
+            lastScanFailureCount = outcome.searchFailures
             lastScanAt = Date()
         } while rescanRequested
         isScanning = false

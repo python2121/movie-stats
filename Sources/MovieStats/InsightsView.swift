@@ -24,6 +24,9 @@ struct InsightsView: View {
                     chartCard("Watch progress by type") { watchedChart }
                 }
                 .frame(height: 280)
+
+                chartCard("Library growth") { growthChart }
+                    .frame(height: 240)
             }
             .padding(24)
         }
@@ -195,6 +198,55 @@ struct InsightsView: View {
             .foregroundStyle(.yellow.gradient)
         }
         .chartXAxisLabel("IMDb rating, rounded down")
+    }
+
+    private struct GrowthPoint: Identifiable {
+        let month: Date
+        let cumulative: Int
+        var id: Date { month }
+    }
+
+    /// Cumulative library count over time, bucketed by the month each file
+    /// was first seen. Rows predating the `first_seen_at` column all carry
+    /// the same backfill timestamp, so old libraries start with one big
+    /// jump — accurate from that point forward.
+    private var growthPoints: [GrowthPoint] {
+        let calendar = Calendar.current
+        let months = appModel.movies.compactMap { movie in
+            movie.firstSeenAt.flatMap {
+                calendar.date(from: calendar.dateComponents([.year, .month], from: $0))
+            }
+        }
+        var running = 0
+        return Dictionary(grouping: months, by: { $0 })
+            .sorted { $0.key < $1.key }
+            .map { month, added in
+                running += added.count
+                return GrowthPoint(month: month, cumulative: running)
+            }
+    }
+
+    @ViewBuilder
+    private var growthChart: some View {
+        if growthPoints.isEmpty {
+            Text("No data yet")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        } else {
+            Chart(growthPoints) { point in
+                AreaMark(
+                    x: .value("Month", point.month, unit: .month),
+                    y: .value("Movies", point.cumulative)
+                )
+                .foregroundStyle(.blue.opacity(0.15))
+                LineMark(
+                    x: .value("Month", point.month, unit: .month),
+                    y: .value("Movies", point.cumulative)
+                )
+                .foregroundStyle(.blue)
+            }
+        }
     }
 
     private struct WatchedBucket: Identifiable {

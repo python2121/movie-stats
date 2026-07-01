@@ -606,8 +606,11 @@ final class ImportSession: MovieScope {
         // `removeItem` rather than walking the tree so any hidden
         // entries (`.DS_Store`, `.AppleDouble`, etc.) get cleaned up
         // alongside the directory itself.
-        if autoPruneSource, !sourceDirectory.isEmpty {
-            let remaining = (try? fm.contentsOfDirectory(atPath: sourceDirectory)) ?? []
+        // A failed listing must never read as "empty" — a transient error
+        // on a network volume would otherwise green-light the permanent
+        // delete below. No listing, no prune.
+        if autoPruneSource, !sourceDirectory.isEmpty,
+           let remaining = try? fm.contentsOfDirectory(atPath: sourceDirectory) {
             let visibleEntries = remaining.filter { !$0.hasPrefix(".") }
             if visibleEntries.isEmpty {
                 try? fm.removeItem(atPath: sourceDirectory)
@@ -618,13 +621,26 @@ final class ImportSession: MovieScope {
         // the TMDB matches by path.
         await appModel.rescan()
         if let store = appModel.store {
+            var matchFailures: [String] = []
             for (path, match) in rekeyedMatches {
-                try? store.setTMDBMatch(
-                    forPath: path,
-                    tmdbID: match.tmdbID,
-                    confirmedYear: match.confirmedYear,
-                    customEdition: match.customEdition
-                )
+                do {
+                    try store.setTMDBMatch(
+                        forPath: path,
+                        tmdbID: match.tmdbID,
+                        confirmedYear: match.confirmedYear,
+                        customEdition: match.customEdition
+                    )
+                } catch {
+                    matchFailures.append(
+                        "\((path as NSString).lastPathComponent): \(error.localizedDescription)"
+                    )
+                }
+            }
+            if !matchFailures.isEmpty {
+                let message = "Moved, but couldn't save the TMDB match for:\n"
+                    + matchFailures.joined(separator: "\n")
+                    + "\nRe-match these from the main window."
+                lastError = lastError.map { "\($0)\n\(message)" } ?? message
             }
             // Persist every successfully-relocated extra under its
             // final library path. We compute the library path by

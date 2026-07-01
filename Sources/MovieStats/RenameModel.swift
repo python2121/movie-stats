@@ -769,7 +769,12 @@ final class RenameModel {
         // Permanent delete (no Trash on network volumes), consistent with
         // the rest of the app.
         for husk in splitHusks where Self.containsOnlyHiddenEntries(husk, fm: fm) {
-            try? fm.removeItem(atPath: husk)
+            do {
+                try fm.removeItem(atPath: husk)
+            } catch {
+                lastError = "Couldn't delete the emptied folder "
+                    + "\((husk as NSString).lastPathComponent): \(error.localizedDescription)"
+            }
         }
 
         // Pull the rekeyed paths back into the AppModel so the main window

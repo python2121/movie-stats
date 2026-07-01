@@ -20,6 +20,10 @@ struct ContentView: View {
     @State private var extrasFilter: ExtrasFilter = .all
     @State private var selectedGenres: Set<String> = []  // empty = all
     @State private var selectedDecades: Set<Int> = []    // empty = all
+    @State private var selectedAudioLanguages: Set<String> = []  // empty = all
+    @State private var hdrFilter: HDRFilter = .all
+    @State private var runtimeFilter: RuntimeFilter = .all
+    @State private var ratingFilter: RatingFilter = .all
     @AppStorage("libraryViewMode") private var viewMode: ViewMode = .list
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var quickLookURL: URL?
@@ -65,6 +69,8 @@ struct ContentView: View {
         case sizeDescending = "Largest First"
         case titleAscending = "Title A→Z"
         case ratingDescending = "Highest Rated"
+        case personalRatingDescending = "My Rating"
+        case runtimeAscending = "Shortest Runtime"
         case yearDescending = "Newest First"
         case recentlyAdded = "Recently Added"
         case recentlyWatched = "Recently Watched"
@@ -94,6 +100,48 @@ struct ContentView: View {
         case all = "All"
         case withExtras = "Has Extras"
         case withoutExtras = "No Extras"
+        var id: String { rawValue }
+    }
+
+    /// HDR/DV isolation. `sdr` requires a completed probe — an unprobed file
+    /// hasn't *proven* it lacks HDR, it just hasn't been read yet.
+    enum HDRFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case anyHDR = "Any HDR"
+        case dolbyVision = "Dolby Vision"
+        case hdr10 = "HDR10"
+        case sdr = "SDR Only"
+        var id: String { rawValue }
+    }
+
+    /// TMDB-runtime buckets. Movies without a matched runtime fall out of
+    /// every non-`all` bucket — no runtime, no claim about length.
+    enum RuntimeFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case under90 = "Under 90 min"
+        case from90to120 = "90–120 min"
+        case from120to150 = "120–150 min"
+        case over150 = "Over 150 min"
+        var id: String { rawValue }
+
+        func contains(_ minutes: Int) -> Bool {
+            switch self {
+            case .all: return true
+            case .under90: return minutes < 90
+            case .from90to120: return minutes >= 90 && minutes < 120
+            case .from120to150: return minutes >= 120 && minutes < 150
+            case .over150: return minutes >= 150
+            }
+        }
+    }
+
+    /// Personal 1–5 star filter (`movies.personal_rating`).
+    enum RatingFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case rated = "Rated"
+        case unrated = "Unrated"
+        case fourPlus = "4+ Stars"
+        case five = "5 Stars"
         var id: String { rawValue }
     }
 
@@ -758,6 +806,43 @@ struct ContentView: View {
             }
         }
 
+        switch hdrFilter {
+        case .all: break
+        case .anyHDR:
+            result = result.filter { $0.hdrFormat != nil || $0.hasDolbyVision }
+        case .dolbyVision:
+            result = result.filter(\.hasDolbyVision)
+        case .hdr10:
+            result = result.filter { $0.hdrFormat == "HDR10" }
+        case .sdr:
+            result = result.filter {
+                $0.probedAt != nil && $0.hdrFormat == nil && !$0.hasDolbyVision
+            }
+        }
+
+        if runtimeFilter != .all {
+            result = result.filter { movie in
+                guard let minutes = movie.runtimeMinutes, minutes > 0 else { return false }
+                return runtimeFilter.contains(minutes)
+            }
+        }
+
+        switch ratingFilter {
+        case .all: break
+        case .rated: result = result.filter { ($0.personalRating ?? 0) > 0 }
+        case .unrated: result = result.filter { ($0.personalRating ?? 0) == 0 }
+        case .fourPlus: result = result.filter { ($0.personalRating ?? 0) >= 4 }
+        case .five: result = result.filter { $0.personalRating == 5 }
+        }
+
+        if !selectedAudioLanguages.isEmpty {
+            result = result.filter { movie in
+                movie.audioLanguages.contains {
+                    selectedAudioLanguages.contains($0.lowercased())
+                }
+            }
+        }
+
         if !selectedGenres.isEmpty {
             result = result.filter { movie in
                 movie.genres.contains { selectedGenres.contains($0) }
@@ -882,6 +967,25 @@ struct ContentView: View {
                 if ar != br { return ar > br }
                 return a.bestQualityTotalSize > b.bestQualityTotalSize
             }
+        case .personalRatingDescending:
+            sorted = unranked.sorted { a, b in
+                let ar = a.representative.personalRating ?? 0
+                let br = b.representative.personalRating ?? 0
+                if ar != br { return ar > br }
+                let ai = a.representative.imdbRating ?? -1
+                let bi = b.representative.imdbRating ?? -1
+                if ai != bi { return ai > bi }
+                return a.bestQualityTotalSize > b.bestQualityTotalSize
+            }
+        case .runtimeAscending:
+            // Unknown runtimes (unmatched movies) sink to the bottom —
+            // "what fits tonight" wants known lengths first.
+            sorted = unranked.sorted { a, b in
+                let ar = a.representative.runtimeMinutes ?? Int.max
+                let br = b.representative.runtimeMinutes ?? Int.max
+                if ar != br { return ar < br }
+                return a.bestQualityTotalSize > b.bestQualityTotalSize
+            }
         case .yearDescending:
             sorted = unranked.sorted { a, b in
                 let ay = a.representative.effectiveYear ?? 0
@@ -976,6 +1080,17 @@ struct ContentView: View {
                     ))
                 }
             }
+            Menu("Audio Language") {
+                ForEach(allAudioLanguages, id: \.self) { code in
+                    Toggle(Self.audioLanguageName(code), isOn: Binding(
+                        get: { selectedAudioLanguages.contains(code) },
+                        set: { on in
+                            if on { selectedAudioLanguages.insert(code) }
+                            else { selectedAudioLanguages.remove(code) }
+                        }
+                    ))
+                }
+            }
             Picker("TMDB Match", selection: $matchFilter) {
                 ForEach(MatchFilter.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -985,14 +1100,27 @@ struct ContentView: View {
             Picker("Extras", selection: $extrasFilter) {
                 ForEach(ExtrasFilter.allCases) { Text($0.rawValue).tag($0) }
             }
+            Picker("HDR", selection: $hdrFilter) {
+                ForEach(HDRFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Picker("Runtime", selection: $runtimeFilter) {
+                ForEach(RuntimeFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Picker("My Rating", selection: $ratingFilter) {
+                ForEach(RatingFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
             Divider()
             Button("Clear All Filters") {
                 selectedTypes.removeAll()
                 selectedGenres.removeAll()
                 selectedDecades.removeAll()
+                selectedAudioLanguages.removeAll()
                 matchFilter = .all
                 watchFilter = .all
                 extrasFilter = .all
+                hdrFilter = .all
+                runtimeFilter = .all
+                ratingFilter = .all
             }
             .disabled(activeFilterCount == 0)
         } label: {
@@ -1019,9 +1147,13 @@ struct ContentView: View {
 
     private var activeFilterCount: Int {
         var count = selectedTypes.count + selectedGenres.count + selectedDecades.count
+            + selectedAudioLanguages.count
         if matchFilter != .all { count += 1 }
         if watchFilter != .all { count += 1 }
         if extrasFilter != .all { count += 1 }
+        if hdrFilter != .all { count += 1 }
+        if runtimeFilter != .all { count += 1 }
+        if ratingFilter != .all { count += 1 }
         return count
     }
 
@@ -1040,6 +1172,26 @@ struct ContentView: View {
         Set(model.movies.compactMap { movie in
             movie.effectiveYear.map { ($0 / 10) * 10 }
         }).sorted(by: >)
+    }
+
+    /// Distinct audio-language codes across the library (lowercased,
+    /// `und`/empty dropped), sorted by display name for the filter menu.
+    private var allAudioLanguages: [String] {
+        var codes = Set<String>()
+        for movie in model.movies {
+            for code in movie.audioLanguages {
+                let normalized = code.lowercased()
+                guard !normalized.isEmpty, normalized != "und" else { continue }
+                codes.insert(normalized)
+            }
+        }
+        return codes.sorted { Self.audioLanguageName($0) < Self.audioLanguageName($1) }
+    }
+
+    private static func audioLanguageName(_ code: String) -> String {
+        Locale(identifier: "en_US")
+            .localizedString(forLanguageCode: code)?
+            .capitalized ?? code.uppercased()
     }
 
     /// Customizable (right-click → Customize Toolbar…) toolbar. Every action
@@ -1136,17 +1288,21 @@ struct ContentView: View {
                     // Color the glyph directly — `.tint` doesn't reliably
                     // recolor a borderless macOS toolbar icon. A filled
                     // badge variant when active makes the change obvious
-                    // even at a glance.
+                    // even at a glance. Orange = the last background scan
+                    // had TMDB lookup errors, so "nothing pending" may
+                    // just mean the network was down.
                     Image(systemName: smartImport.hasPending
                           ? "wand.and.stars.inverse"
                           : "wand.and.stars")
-                        .foregroundStyle(smartImport.hasPending ? Color.blue : Color.primary)
+                        .foregroundStyle(smartImport.hasPending
+                                         ? Color.blue
+                                         : smartImport.lastScanFailureCount > 0
+                                             ? Color.orange
+                                             : Color.primary)
                         .symbolVariant(smartImport.hasPending ? .fill : .none)
                 }
             }
-            .help(smartImport.hasPending
-                  ? "\(smartImport.pendingMatchCount) download(s) in the watch directory are ready to import"
-                  : "Auto-match, clean, rename, and import downloads from your watch directory")
+            .help(smartImportHelp)
         }
     }
 
@@ -1241,6 +1397,16 @@ struct ContentView: View {
                 .help(chatOpen ? "Close the Ask Claude panel" : "Ask Claude about your library")
             }
         }
+    }
+
+    private var smartImportHelp: String {
+        var help = smartImport.hasPending
+            ? "\(smartImport.pendingMatchCount) download(s) in the watch directory are ready to import"
+            : "Auto-match, clean, rename, and import downloads from your watch directory"
+        if smartImport.lastScanFailureCount > 0 {
+            help += " — \(smartImport.lastScanFailureCount) TMDB lookup(s) failed on the last scan, so the count may be low"
+        }
+        return help
     }
 
     /// "What should I watch tonight?" — weighted random pick from the

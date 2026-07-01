@@ -667,9 +667,13 @@ Added June 2026. Automates the §6.7 import wizard against a persistent
 library). Three pieces:
 
 - **`SmartImportScanner`** (`Services/SmartImportScanner.swift`) — pure
-  background detection. Walks the watch dir and returns the paths that
-  confidently auto-match TMDB, using the *same* rule as the interactive
-  matcher (`MatcherModel.Row.isConfidentMatch` — the exact `Title (Year)`
+  background detection. Walks the watch dir and returns an `Outcome`: the
+  paths that confidently auto-match TMDB plus a `searchFailures` count of
+  TMDB lookups that *errored* (network / rate limit) rather than returning
+  no results — so a dead network isn't mistaken for "nothing importable"
+  (the toolbar wand goes orange when failures > 0 and nothing is pending).
+  Matching uses the *same* rule as the interactive matcher
+  (`MatcherModel.Row.isConfidentMatch` — the exact `Title (Year)`
   match or fuzzy ≥0.80 + same year, extracted to a shared static so the
   two can't drift). One search call per video, search-endpoint year (no
   per-row details fetch). No DB writes / deletes / renames.
